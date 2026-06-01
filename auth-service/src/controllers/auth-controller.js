@@ -1,26 +1,32 @@
-const RefreshToken = require("../models/refresh-token");
-const User = require("../models/user");
+require("dotenv").config({
+  path: require("path").resolve(__dirname, "../.env"),
+});
 
-const generateToken = require("../utils/generate-token");
+const jwt = require("jsonwebtoken");
+
+const User = require("../models/user");
+const RefreshToken = require("../models/refresh-token");
+
+const redis = require("../config/redis");
 const logger = require("../utils/logger");
 
-const {
-  validateRegistration,
-  validateLogin,
-} = require("../utils/validation");
+const generateToken = require("../utils/generate-token");
 
+const { validateRegistration, validateLogin } = require("../utils/validation");
 
-// REGISTER USER
+const { sendOtpEmail } = require("../services/email-service");
+
+const { calculateRisk, generateOtp } = require("../utils/auth-utils");
+
+const { v4: uuidv4 } = require("uuid");
+
+// REGISTER
 const registerUser = async (req, res) => {
-  logger.info("Registration endpoint hit");
+  logger.info("Register endpoint hit");
 
   try {
-    // Validate the schema
     const { error } = validateRegistration(req.body);
-
     if (error) {
-      logger.warn("Validation error", error.details[0].message);
-
       return res.status(400).json({
         success: false,
         message: error.details[0].message,
@@ -29,47 +35,39 @@ const registerUser = async (req, res) => {
 
     const { fullName, email, password } = req.body;
 
-    // Check if user already exists
-    const existingUser = await User.findOne({
+    const exists = await User.findOne({
       $or: [{ email }, { fullName }],
     });
 
-    if (existingUser) {
-      logger.warn("User already exists");
-
+    if (exists) {
       return res.status(409).json({
         success: false,
         message: "User already exists",
       });
     }
 
-    // Create user
-    const user = new User({
+    const user = await User.create({
       fullName,
       email,
       password,
+      isVerified: false,
+      devices: [],
     });
 
-    await user.save();
+    const otp = generateOtp();
 
-    logger.info(`User created successfully: ${user._id}`);
+    await redis.setex(`signup_otp:${user._id}`, 300, otp);
+    await sendOtpEmail(email, otp);
 
-    // Generate tokens
-    const { accessToken, refreshToken } = await generateToken(user);
+    logger.info(`Signup OTP sent: ${user._id}`);
 
     return res.status(201).json({
       success: true,
-      message: "User registered successfully",
-      accessToken,
-      refreshToken,
-      user: {
-        id: user._id,
-        fullName: user.fullName,
-        email: user.email,
-      },
+      message: "OTP sent to email",
+      userId: user._id,
     });
-  } catch (error) {
-    logger.error("Registration error occurred", error);
+  } catch (err) {
+    logger.error("Register error", err);
 
     return res.status(500).json({
       success: false,
@@ -78,18 +76,106 @@ const registerUser = async (req, res) => {
   }
 };
 
+// VERIFY SIGNUP OTP
+const verifyRegisterOtp = async (req, res) => {
+  logger.info("Verify signup OTP hit");
 
-// LOGIN USER
+  try {
+    const { userId, otp } = req.body;
+
+    if (!userId || !otp) {
+      return res.status(400).json({
+        success: false,
+        message: "userId and otp are required",
+      });
+    }
+
+    const stored = await redis.get(`signup_otp:${userId}`);
+
+    if (!stored || stored.trim() !== otp.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid OTP",
+      });
+    }
+
+    const user = await User.findById(userId);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    user.isVerified = true;
+
+    const deviceId = uuidv4();
+    const userAgent = req.headers["user-agent"];
+
+    user.devices = user.devices || [];
+
+    user.devices.push({
+      deviceId,
+      ip: req.ip,
+      userAgent,
+      createdAt: new Date(),
+    });
+
+    await user.save();
+    await redis.del(`signup_otp:${userId}`);
+
+    const tokens = await generateToken(user, deviceId, req.ip, userAgent);
+
+    return res.json({
+      success: true,
+      message: "Account verified successfully",
+      ...tokens,
+    });
+  } catch (err) {
+    logger.error("Verify signup OTP error", err);
+
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+};
+
+// RESEND SIGNUP OTP
+const resendRegisterOtp = async (req, res) => {
+  const { email } = req.body;
+
+  const user = await User.findOne({ email });
+
+  if (!user) {
+    return res.status(404).json({ message: "User not found" });
+  }
+
+  if (user.isVerified) {
+    return res.status(400).json({
+      message: "User already verified",
+    });
+  }
+
+  const otp = generateOtp();
+
+  await redis.setex(`signup_otp:${user._id}`, 300, otp);
+  await sendOtpEmail(user.email, otp);
+
+  return res.json({
+    success: true,
+    message: "Signup OTP resent",
+  });
+};
+
+// LOGIN
 const loginUser = async (req, res) => {
   logger.info("Login endpoint hit");
 
   try {
-    // Validate request
     const { error } = validateLogin(req.body);
-
     if (error) {
-      logger.warn("Validation error", error.details[0].message);
-
       return res.status(400).json({
         success: false,
         message: error.details[0].message,
@@ -98,48 +184,85 @@ const loginUser = async (req, res) => {
 
     const { email, password } = req.body;
 
-    // Find user
     const user = await User.findOne({ email });
 
-    if (!user) {
-      logger.warn("Invalid email");
-
+    if (!user || !(await user.comparePassword(password))) {
       return res.status(401).json({
         success: false,
         message: "Invalid credentials",
       });
     }
 
-    // Compare password
-    const isMatch = await user.comparePassword(password);
-
-    if (!isMatch) {
-      logger.warn("Invalid password");
-
-      return res.status(401).json({
+    if (!user.isVerified) {
+      return res.status(403).json({
         success: false,
-        message: "Invalid credentials",
+        message: "Verify your account first",
       });
     }
 
-    // Generate tokens
-    const { accessToken, refreshToken } = await generateToken(user);
+    const deviceId = req.headers["x-device-id"];
+    const userAgent = req.headers["user-agent"];
 
-    logger.info(`User logged in: ${user._id}`);
+    if (!deviceId) {
+      return res.status(400).json({
+        success: false,
+        message: "Device ID required",
+      });
+    }
 
-    return res.status(200).json({
-      success: true,
-      message: "Login successful",
-      accessToken,
-      refreshToken,
-      user: {
-        id: user._id,
-        fullName: user.fullName,
-        email: user.email,
-      },
+    const risk = calculateRisk({
+      user,
+      deviceId,
+      ip: req.ip,
     });
-  } catch (error) {
-    logger.error("Login error occurred", error);
+
+    logger.info(`Risk score: ${risk}`);
+
+    // Check High risk
+    if (risk >= 80) {
+      return res.status(403).json({
+        success: false,
+        message: "Suspicious login blocked",
+      });
+    }
+
+    const otp = generateOtp();
+
+    // MFA is required
+    if (user.mfaEnabled || (risk > 30 && risk < 80)) {
+      const mfaToken = jwt.sign(
+        {
+          userId: user._id,
+          deviceId,
+          stage: "MFA_PENDING",
+        },
+        process.env.JWT_SECRET,
+        { expiresIn: "10m" },
+      );
+
+      await redis.setex(`login_otp:${user._id}`, 300, otp);
+      await sendOtpEmail(user.email, otp);
+
+      return res.json({
+        success: true,
+        mfaRequired: true,
+        mfaToken,
+        userId: user._id,
+        message: "MFA OTP sent",
+      });
+    }
+
+    // Check Low risk login
+    const tokens = await generateToken(user, deviceId, req.ip, userAgent);
+
+    logger.info(`Login success: ${user._id}`);
+
+    return res.json({
+      success: true,
+      ...tokens,
+    });
+  } catch (err) {
+    logger.error("Login error", err);
 
     return res.status(500).json({
       success: false,
@@ -148,6 +271,126 @@ const loginUser = async (req, res) => {
   }
 };
 
+// VERIFY LOGIN OTP
+const verifyLoginOtp = async (req, res) => {
+  logger.info("Verify login OTP hit");
+
+  try {
+    const { userId, otp, deviceId } = req.body;
+
+    if (!userId || !otp || !deviceId) {
+      return res.status(400).json({
+        success: false,
+        message: "userId, otp and deviceId are required",
+      });
+    }
+
+    const stored = await redis.get(`login_otp:${userId}`);
+
+    if (!stored || stored.trim() !== otp.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid OTP",
+      });
+    }
+
+    const user = await User.findById(userId);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    user.devices = user.devices || [];
+
+    user.devices.push({
+      deviceId,
+      ip: req.ip,
+      createdAt: new Date(),
+    });
+
+    user.lastLoginIp = req.ip;
+
+    await user.save();
+    await redis.del(`login_otp:${userId}`);
+
+    const tokens = await generateToken(
+      user,
+      deviceId,
+      req.ip,
+      req.headers["user-agent"],
+    );
+
+    return res.json({
+      success: true,
+      ...tokens,
+    });
+  } catch (err) {
+    logger.error("Verify login OTP error", err);
+
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+};
+
+// RESEND LOGIN OTP
+const resendLoginOtp = async (req, res) => {
+  logger.info("Resend login OTP hit");
+
+  try {
+    const { mfaToken } = req.body;
+
+    if (!mfaToken) {
+      return res.status(400).json({
+        success: false,
+        message: "mfaToken required",
+      });
+    }
+
+    // verify MFA token
+    const decoded = jwt.verify(mfaToken, process.env.JWT_SECRET);
+
+    if (decoded.stage !== "MFA_PENDING") {
+      return res.status(403).json({
+        success: false,
+        message: "Invalid MFA stage",
+      });
+    }
+
+    const user = await User.findById(decoded.userId);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    // generate new OTP
+    const otp = generateOtp();
+
+    await redis.setex(`login_otp:${user._id}`, 300, otp);
+    await sendOtpEmail(user.email, otp);
+
+    logger.info(`Resent MFA OTP: ${user._id}`);
+
+    return res.json({
+      success: true,
+      message: "OTP resent",
+    });
+  } catch (err) {
+    logger.error("Resend OTP error", err);
+
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+};
 
 // REFRESH TOKEN
 const refreshTokenUser = async (req, res) => {
@@ -157,33 +400,22 @@ const refreshTokenUser = async (req, res) => {
     const { refreshToken } = req.body;
 
     if (!refreshToken) {
-      logger.warn("Refresh token missing");
-
       return res.status(401).json({
         success: false,
         message: "Refresh token missing",
       });
     }
 
-    // Find token in DB
-    const storedToken = await RefreshToken.findOne({
-      token: refreshToken,
-    });
+    const storedToken = await RefreshToken.findOne({ token: refreshToken });
 
     if (!storedToken) {
-      logger.warn("Refresh token not found");
-
       return res.status(401).json({
         success: false,
         message: "Invalid refresh token",
       });
     }
 
-    // Check expiration
     if (storedToken.expiresAt < new Date()) {
-      logger.warn("Refresh token expired");
-
-      // delete expired token
       await RefreshToken.deleteOne({ _id: storedToken._id });
 
       return res.status(401).json({
@@ -192,38 +424,27 @@ const refreshTokenUser = async (req, res) => {
       });
     }
 
-    // Find user
     const user = await User.findById(storedToken.user);
 
     if (!user) {
-      logger.warn("User not found");
-
       return res.status(404).json({
         success: false,
         message: "User not found",
       });
     }
 
-    // Generate new tokens
-    const {
-      accessToken: newAccessToken,
-      refreshToken: newRefreshToken,
-    } = await generateToken(user);
+    const { accessToken, refreshToken: newRefreshToken } =
+      await generateToken(user);
 
-    // Delete old refresh token
-    await RefreshToken.deleteOne({
-      _id: storedToken._id,
-    });
-
-    logger.info(`Refresh token rotated for user: ${user._id}`);
+    await RefreshToken.deleteOne({ _id: storedToken._id });
 
     return res.status(200).json({
       success: true,
-      accessToken: newAccessToken,
+      accessToken,
       refreshToken: newRefreshToken,
     });
   } catch (error) {
-    logger.error("Refresh token error occurred", error);
+    logger.error("Refresh token error", error);
 
     return res.status(500).json({
       success: false,
@@ -232,36 +453,26 @@ const refreshTokenUser = async (req, res) => {
   }
 };
 
-
-// LOGOUT USER
+// LOGOUT
 const logoutUser = async (req, res) => {
-  logger.info("Logout endpoint hit");
-
   try {
     const { refreshToken } = req.body;
 
     if (!refreshToken) {
-      logger.warn("Refresh token missing");
-
       return res.status(400).json({
         success: false,
-        message: "Refresh token missing",
+        message: "Refresh token required",
       });
     }
 
-    // Delete refresh token
-    await RefreshToken.deleteOne({
-      token: refreshToken,
-    });
+    await RefreshToken.deleteOne({ token: refreshToken });
 
-    logger.info("User logged out successfully");
-
-    return res.status(200).json({
+    return res.json({
       success: true,
-      message: "Logged out successfully",
+      message: "Logged out",
     });
-  } catch (error) {
-    logger.error("Logout error occurred", error);
+  } catch (err) {
+    logger.error("Logout error", err);
 
     return res.status(500).json({
       success: false,
@@ -270,10 +481,52 @@ const logoutUser = async (req, res) => {
   }
 };
 
+// LOGOUT ALL DEVICES
+const logoutAllDevices = async (req, res) => {
+  try {
+    if (!req.user?.userId) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized",
+      });
+    }
+
+    const user = await User.findById(req.user.userId);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    user.devices = [];
+    await user.save();
+
+    await RefreshToken.deleteMany({ user: user._id });
+
+    return res.json({
+      success: true,
+      message: "Logged out all devices",
+    });
+  } catch (err) {
+    logger.error("Logout all error", err);
+
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+};
 
 module.exports = {
   registerUser,
   loginUser,
+  verifyRegisterOtp,
+  verifyLoginOtp,
   refreshTokenUser,
   logoutUser,
+  logoutAllDevices,
+  resendLoginOtp,
+  resendRegisterOtp
 };

@@ -7,14 +7,24 @@ const refreshTokenSchema = new mongoose.Schema(
       required: true,
       unique: true,
     },
+
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
     },
+
+    deviceId: {
+      type: String,
+      required: true,
+    },
+
+    ip: String,
+    userAgent: String,
+
     expiresAt: {
       type: Date,
-      require: true,
+      required: true,
     },
   },
   { timestamps: true },

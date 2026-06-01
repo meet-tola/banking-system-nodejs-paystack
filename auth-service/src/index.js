@@ -5,7 +5,9 @@ const express = require("express");
 const helmet = require("helmet");
 const cors = require("cors");
 
-const routes = require("./routes/auth-service");
+const authRoutes = require("./routes/auth-route");
+const mfaRoutes = require("./routes/mfa-route");
+const userRoutes = require("./routes/user-route");
 const errorHandler = require("./middleware/error-handler");
 
 const {
@@ -48,9 +50,12 @@ app.use(globalRateLimiter);
 
 // Sensitive routes
 app.use("/api/auth/register", sensitiveEndpointsLimiter);
+app.use("/api/auth/login", sensitiveEndpointsLimiter);
 
 // Routes
-app.use("/api/auth", routes);
+app.use("/api/auth", authRoutes);
+app.use("/api/mfa", mfaRoutes);
+app.use("/api/auth", userRoutes);
 
 // Error handler
 app.use(errorHandler);

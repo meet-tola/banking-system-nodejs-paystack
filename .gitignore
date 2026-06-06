@@ -5,6 +5,11 @@ node_modules/
 .env
 .env.*
 
+# Docker configurations
+Dockerfile
+Dockerfile.*
+.dockerignore
+
 # logs
 logs
 *.log

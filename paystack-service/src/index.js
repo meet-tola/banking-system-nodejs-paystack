@@ -1,0 +1,64 @@
+require("dotenv").config({
+  path: require("path").resolve(__dirname, "../.env"),
+});
+const express = require("express");
+const helmet = require("helmet");
+const cors = require("cors");
+
+const fundingRoutes = require("./routes/funding-route");
+const withdrawalRoutes = require("./routes/withdrawal-route");
+const webhookRoutes = require("./routes/webhook-route");
+
+const errorHandler = require("./middleware/error-handler");
+
+const { globalRateLimiter } = require("./middleware/rate-limiter");
+
+const logger = require("./utils/logger");
+const connectDB = require("./config/db");
+
+// Initialize Redis connection
+require("./config/redis");
+
+const app = express();
+
+const PORT = process.env.PORT || 3005;
+
+// Connect databse
+connectDB();
+
+// Security middleware
+app.use(helmet());
+app.use(cors());
+
+app.use(express.json());
+
+// Logger middleware
+app.use((req, res, next) => {
+  logger.info(`Received ${req.method} request to ${req.url}`);
+
+  if (Object.keys(req.body || {}).length > 0) {
+    logger.info(`Request Body: ${JSON.stringify(req.body)}`);
+  }
+
+  next();
+});
+
+// Global rate limiter
+app.use(globalRateLimiter);
+
+// Routes
+app.use("/api/paystack/funding", fundingRoutes);
+app.use("/api/paystack/withdrawal", fundingRoutes);
+app.use("/api/paystack/webhooks", webhookRoutes);
+
+// Error handler
+app.use(errorHandler);
+
+app.listen(PORT, () => {
+  logger.info(`Paystack service is running on port ${PORT}`);
+});
+
+//unhandled promise rejection
+process.on("unhandledRejection", (reason, promise) => {
+  logger.error("Unhandled Rejection at", promise, "reason:", reason);
+});

@@ -22,6 +22,10 @@ const authProxy = proxy(process.env.AUTH_SERVICE_URL, {
 
   proxyReqOptDecorator: (proxyReqOpts) => {
     proxyReqOpts.headers["Content-Type"] = "application/json";
+    const incomingDeviceId = srcReq.headers["x-device-id"];
+    if (incomingDeviceId) {
+      proxyReqOpts.headers["x-device-id"] = incomingDeviceId;
+    }
 
     return proxyReqOpts;
   },
@@ -54,6 +58,10 @@ const transactionProxy = proxy(process.env.TRANSACTION_SERVICE_URL, {
   proxyReqOptDecorator: (proxyReqOpts, srcReq) => {
     proxyReqOpts.headers["Content-Type"] = "application/json";
     proxyReqOpts.headers["x-user-id"] = srcReq.user.userId;
+    const incomingDeviceId = srcReq.headers["x-device-id"];
+    if (incomingDeviceId) {
+      proxyReqOpts.headers["x-device-id"] = incomingDeviceId;
+    }
     return proxyReqOpts;
   },
   userResDecorator: (proxyRes, proxyResData, userReq, userRes) => {
@@ -113,4 +121,11 @@ const fraudDetectionProxy = proxy(process.env.FRAUD_DETECTION_SERVICE_URL, {
   },
 });
 
-module.exports = { authProxy, walletProxy, ledgerProxy, transactionProxy, paystackProxy, fraudDetectionProxy };
+module.exports = {
+  authProxy,
+  walletProxy,
+  ledgerProxy,
+  transactionProxy,
+  paystackProxy,
+  fraudDetectionProxy,
+};

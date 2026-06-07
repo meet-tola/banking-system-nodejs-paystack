@@ -48,7 +48,6 @@ const createTransaction = async (req, res) => {
 
     // Get wallets
     const senderWallet = await getWalletById(fromAccount);
-
     const receiverWallet = await getWalletById(toAccount);
 
     if (!senderWallet) {
@@ -106,13 +105,24 @@ const createTransaction = async (req, res) => {
 
     logger.info("Transaction created successfully");
 
+    // Unified context extracted for device identity verification layer
+    const contextMeta = {
+      ip: req.ip,
+      deviceId: req.headers["x-device-id"],
+      userAgent: req.headers["user-agent"]
+    };
+
     // Emit 'transaction.created' Event
-    await publishEvent('transaction.created', fromAccount, {
-      transactionId: transaction._id,
-      fromAccount,
-      toAccount,
-      amount,
-      userId: req.user.userId
+    await publishEvent('transaction-events', fromAccount, {
+      eventType: "transaction.created",
+      payload: {
+        transactionId: transaction._id,
+        fromAccount,
+        toAccount,
+        amount,
+        userId: req.user.userId
+      },
+      context: contextMeta
     });
 
     // Call Ledger Service
@@ -132,13 +142,17 @@ const createTransaction = async (req, res) => {
       transaction.status = "COMPLETED";
       await transaction.save();
 
-      // Emit 'transaction.completed' Event (Triggers Notifications & Core Analytics updates)
-      await publishEvent('transaction.completed', fromAccount, {
-        transactionId: transaction._id,
-        fromAccount,
-        toAccount,
-        amount,
-        userId: req.user.userId
+      // Emit 'transaction.completed' Event 
+      await publishEvent('transaction-events', fromAccount, {
+        eventType: "transaction.completed",
+        payload: {
+          transactionId: transaction._id,
+          fromAccount,
+          toAccount,
+          amount,
+          userId: req.user.userId
+        },
+        context: contextMeta
       });
 
       // Return Success
@@ -153,13 +167,18 @@ const createTransaction = async (req, res) => {
       transaction.status = "FAILED";
       await transaction.save();
 
-      // Emit 'transaction.failed' Event (Triggers failure alerts / frees locked risk metrics)
-      await publishEvent('transaction.failed', fromAccount, {
-        transactionId: transaction._id,
-        fromAccount,
-        toAccount,
-        amount,
-        reason: ledgerError.message || "Ledger processing error"
+      // Emit 'transaction.failed' Event (Triggers failure tracking velocity limits)
+      await publishEvent('transaction-events', fromAccount, {
+        eventType: "transaction.failed",
+        payload: {
+          transactionId: transaction._id,
+          fromAccount,
+          toAccount,
+          amount,
+          userId: req.user.userId,
+          reason: ledgerError.message || "Ledger processing error"
+        },
+        context: contextMeta
       });
 
       return res.status(400).json({
@@ -184,7 +203,7 @@ const getTransactionById = async (req, res) => {
     const transaction = await Transaction.findById(req.params.id);
 
     if (!transaction) {
-      logger.error("Transaction not found", error);
+      logger.error("Transaction not found");
 
       return res.status(404).json({
         success: false,

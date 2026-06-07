@@ -20,6 +20,9 @@ const { calculateRisk, generateOtp } = require("../utils/auth-utils");
 
 const { v4: uuidv4 } = require("uuid");
 
+// Require Kafka producer to pipeline state to fraud context
+const { publishEvent } = require("../utils/kafka-producer");
+
 // REGISTER
 const registerUser = async (req, res) => {
   logger.info("Register endpoint hit");
@@ -60,6 +63,14 @@ const registerUser = async (req, res) => {
     await sendOtpEmail(email, otp);
 
     logger.info(`Signup OTP sent: ${user._id}`);
+
+    // Emit 'UserRegistered' to construct local Fraud Profile read-model
+    await publishEvent("user-auth", user._id, {
+      eventType: "UserRegistered",
+      userId: user._id,
+      email: user.email,
+      ip: req.ip
+    });
 
     return res.status(201).json({
       success: true,
@@ -257,6 +268,13 @@ const loginUser = async (req, res) => {
 
     logger.info(`Login success: ${user._id}`);
 
+    // Emit 'UserLoggedIn' directly to trigger device & IP geolocation risk verification loops
+    await publishEvent("user-auth", user._id, {
+      eventType: "UserLoggedIn",
+      payload: { userId: user._id, email: user.email },
+      context: { ip: req.ip, deviceId, userAgent }
+    });
+
     return res.json({
       success: true,
       ...tokens,
@@ -326,6 +344,13 @@ const verifyLoginOtp = async (req, res) => {
       req.ip,
       req.headers["user-agent"],
     );
+
+    // Emit 'UserLoggedIn' on successful MFA step conversion
+    await publishEvent("user-auth", user._id, {
+      eventType: "UserLoggedIn",
+      payload: { userId: user._id, email: user.email },
+      context: { ip: req.ip, deviceId, userAgent: req.headers["user-agent"] }
+    });
 
     return res.json({
       success: true,
@@ -527,6 +552,23 @@ const logoutAllDevices = async (req, res) => {
   }
 };
 
+
+const changePasswordSimulation = async (req, res) => {
+  try {
+    const { userId } = req.body;
+    
+    // Broadcast 'PasswordChanged' event sequence to trigger the fraud chaining rule
+    await publishEvent("user-auth", userId, {
+      eventType: "PasswordChanged",
+      userId
+    });
+
+    return res.json({ success: true, message: "Password updated successfully" });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 module.exports = {
   registerUser,
   loginUser,
@@ -537,4 +579,5 @@ module.exports = {
   logoutAllDevices,
   resendLoginOtp,
   resendRegisterOtp,
+  changePasswordSimulation
 };

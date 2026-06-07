@@ -12,7 +12,14 @@ const apiLimiter = require("./middleware/rate-limiter");
 const errorHandler = require("./middleware/error-handler");
 const { validateToken } = require("./middleware/auth-middleware");
 
-const { authProxy, walletProxy, ledgerProxy, transactionProxy } = require("./proxy/proxy");
+const {
+  authProxy,
+  walletProxy,
+  ledgerProxy,
+  transactionProxy,
+  fraudDetectionProxy,
+  paystackProxy,
+} = require("./proxy/proxy");
 
 // Initialize Redis connection
 require("./config/redis");
@@ -50,6 +57,8 @@ app.use("/v1/auth", authProxy);
 app.use("/v1/wallet", validateToken, walletProxy);
 app.use("/v1/ledger", validateToken, ledgerProxy);
 app.use("/v1/transaction", validateToken, transactionProxy);
+app.use("/v1/paystack", validateToken, paystackProxy);
+app.use("/v1/fraud-detection", validateToken, fraudDetectionProxy);
 
 // Error handler
 app.use(errorHandler);
@@ -60,6 +69,8 @@ app.listen(PORT, () => {
   logger.info(`Wallet Service URL: ${process.env.WALLET_SERVICE_URL}`);
   logger.info(`Ledger Service URL: ${process.env.LEDGER_SERVICE_URL}`);
   logger.info(`Transaction Service URL: ${process.env.TRANSACTION_SERVICE_URL}`);
+  logger.info(`Paystack Service URL: ${process.env.PAYSTACK_SERVICE_URL}`);
+  logger.info(`Fraud Detection Service URL: ${process.env.FRAUD_DETECTION_SERVICE_URL}`);
   logger.info(`Redis URL: ${process.env.REDIS_URL}`);
 });
 

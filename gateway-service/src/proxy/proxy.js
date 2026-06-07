@@ -65,7 +65,7 @@ const transactionProxy = proxy(process.env.TRANSACTION_SERVICE_URL, {
   },
 });
 
-const ledgerProxy = proxy(process.env.WALLET_SERVICE_URL, {
+const ledgerProxy = proxy(process.env.LEDGER_SERVICE_URL, {
   ...proxyOptions,
   proxyReqOptDecorator: (proxyReqOpts, srcReq) => {
     proxyReqOpts.headers["Content-Type"] = "application/json";
@@ -81,4 +81,36 @@ const ledgerProxy = proxy(process.env.WALLET_SERVICE_URL, {
   },
 });
 
-module.exports = { authProxy, walletProxy, ledgerProxy, transactionProxy };
+const paystackProxy = proxy(process.env.PAYSTACK_SERVICE_URL, {
+  ...proxyOptions,
+  proxyReqOptDecorator: (proxyReqOpts, srcReq) => {
+    proxyReqOpts.headers["Content-Type"] = "application/json";
+    proxyReqOpts.headers["x-user-id"] = srcReq.user.userId;
+    return proxyReqOpts;
+  },
+  userResDecorator: (proxyRes, proxyResData, userReq, userRes) => {
+    logger.info(
+      `Response received from Paystack service: ${proxyRes.statusCode}`,
+    );
+
+    return proxyResData;
+  },
+});
+
+const fraudDetectionProxy = proxy(process.env.FRAUD_DETECTION_SERVICE_URL, {
+  ...proxyOptions,
+  proxyReqOptDecorator: (proxyReqOpts, srcReq) => {
+    proxyReqOpts.headers["Content-Type"] = "application/json";
+    proxyReqOpts.headers["x-user-id"] = srcReq.user.userId;
+    return proxyReqOpts;
+  },
+  userResDecorator: (proxyRes, proxyResData, userReq, userRes) => {
+    logger.info(
+      `Response received from fraud detection service: ${proxyRes.statusCode}`,
+    );
+
+    return proxyResData;
+  },
+});
+
+module.exports = { authProxy, walletProxy, ledgerProxy, transactionProxy, paystackProxy, fraudDetectionProxy };

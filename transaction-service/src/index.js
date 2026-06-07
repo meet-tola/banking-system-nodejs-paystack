@@ -8,22 +8,22 @@ const cors = require("cors");
 const transactionRoutes = require("./routes/transaction-route");
 const errorHandler = require("./middleware/error-handler");
 
-const {
-  globalRateLimiter,
-} = require("./middleware/rate-limiter");
+const { globalRateLimiter } = require("./middleware/rate-limiter");
 
 const logger = require("./utils/logger");
 const connectDB = require("./config/db");
+const { connectKafka } = require("./utils/kafka-producer");
 
-// Initialize Redis connection
+// Initialize Redis and Kafka connection
 require("./config/redis");
+connectKafka();
+
 
 const app = express();
+// Connect database
+connectDB();
 
 const PORT = process.env.PORT || 3004;
-
-// Connect databse
-connectDB();
 
 // Security middleware
 app.use(helmet());

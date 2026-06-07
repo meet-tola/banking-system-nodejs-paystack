@@ -23,6 +23,7 @@
     "helmet": "^8.1.0",
     "ioredis": "^5.10.1",
     "joi": "^18.1.2",
+    "kafkajs": "^2.2.4",
     "mongoose": "^8.23.1",
     "rate-limit-redis": "^4.3.1",
     "rate-limiter-flexible": "^11.1.0",

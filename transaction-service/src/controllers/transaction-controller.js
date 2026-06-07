@@ -3,6 +3,7 @@ const Transaction = require("../models/transaction");
 const logger = require("../utils/logger");
 const { transferFunds, getBalance } = require("../services/ledger-service");
 const { getWalletById } = require("../services/wallet-service");
+const { publishEvent } = require("../utils/kafka-producer");
 
 const createTransaction = async (req, res) => {
   logger.info("Create Transaction endpoint hit");
@@ -105,6 +106,15 @@ const createTransaction = async (req, res) => {
 
     logger.info("Transaction created successfully");
 
+    // Emit 'transaction.created' Event
+    await publishEvent('transaction.created', fromAccount, {
+      transactionId: transaction._id,
+      fromAccount,
+      toAccount,
+      amount,
+      userId: req.user.userId
+    });
+
     // Call Ledger Service
     try {
       const result = await transferFunds({
@@ -120,8 +130,16 @@ const createTransaction = async (req, res) => {
 
       // Update Transaction Status
       transaction.status = "COMPLETED";
-
       await transaction.save();
+
+      // Emit 'transaction.completed' Event (Triggers Notifications & Core Analytics updates)
+      await publishEvent('transaction.completed', fromAccount, {
+        transactionId: transaction._id,
+        fromAccount,
+        toAccount,
+        amount,
+        userId: req.user.userId
+      });
 
       // Return Success
       return res.status(201).json({
@@ -133,8 +151,16 @@ const createTransaction = async (req, res) => {
       logger.error("Ledger transfer failed", ledgerError);
 
       transaction.status = "FAILED";
-
       await transaction.save();
+
+      // Emit 'transaction.failed' Event (Triggers failure alerts / frees locked risk metrics)
+      await publishEvent('transaction.failed', fromAccount, {
+        transactionId: transaction._id,
+        fromAccount,
+        toAccount,
+        amount,
+        reason: ledgerError.message || "Ledger processing error"
+      });
 
       return res.status(400).json({
         success: false,

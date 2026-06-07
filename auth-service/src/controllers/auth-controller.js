@@ -260,6 +260,10 @@ const loginUser = async (req, res) => {
     return res.json({
       success: true,
       ...tokens,
+      user: {
+        id: user._id,
+        email: user.email,
+      },
     });
   } catch (err) {
     logger.error("Login error", err);
@@ -326,6 +330,10 @@ const verifyLoginOtp = async (req, res) => {
     return res.json({
       success: true,
       ...tokens,
+      user: {
+        id: user._id,
+        email: user.email,
+      },
     });
   } catch (err) {
     logger.error("Verify login OTP error", err);
@@ -528,5 +536,5 @@ module.exports = {
   logoutUser,
   logoutAllDevices,
   resendLoginOtp,
-  resendRegisterOtp
+  resendRegisterOtp,
 };

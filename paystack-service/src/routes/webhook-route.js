@@ -9,6 +9,6 @@ const router = express.Router();
 
 router.use(authenticateRequest);
 
-router.post("/handle", handleWebhook);
+router.post("/", handleWebhook);
 
 module.exports = router;

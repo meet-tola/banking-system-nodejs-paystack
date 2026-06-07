@@ -4,7 +4,7 @@ require("dotenv").config({
 const axios = require("axios");
 
 const client = axios.create({
-  baseURL: PAYSTACK_URL,
+  baseURL: "https://api.paystack.co",
   headers: {
     Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
     "Content-Type": "application/json",

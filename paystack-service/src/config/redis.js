@@ -1,7 +1,8 @@
 const Redis = require("ioredis");
 const logger = require("../utils/logger");
 
-const redisClient = new Redis(process.env.REDIS_URL);
+const redisConnectionString = process.env.REDIS_URL || "redis://redis:6379";
+const redisClient = new Redis(redisConnectionString);
 
 redisClient.on("connect", () => {
   logger.info("Redis connected");

@@ -43,8 +43,6 @@ const WithdrawalSchema = new mongoose.Schema(
     reference: {
       type: String,
       required: true,
-      unique: true,
-      index: true,
     },
 
     recipientCode: {

@@ -20,8 +20,7 @@ const handleWebhook = async (req, res) => {
 
     const event = req.body;
 
-    const reference =
-      event.data.reference || event.data.id;
+    const reference = event.data.reference || event.data.id;
 
     const eventId = `${event.event}_${reference}`;
 
@@ -40,33 +39,33 @@ const handleWebhook = async (req, res) => {
     if (event.event === "charge.success") {
       const amount = event.data.amount / 100;
 
-      const virtualAccount =
-        await VirtualAccount.findOne({
-          customerCode:
-            event.data.customer.customer_code,
-        });
+      const customerCode = event?.data?.customer?.customer_code;
+
+      const virtualAccount = await VirtualAccount.findOne({
+        customerCode: customerCode,
+      });
 
       if (!virtualAccount) return res.sendStatus(200);
 
-      const funding =
-        await FundingTransaction.create({
-          user: virtualAccount.user,
-          wallet: virtualAccount.user,
-          amount,
-          reference,
-          providerTransactionId:
-            event.data.id,
-          status: "SUCCESS",
-          channel:
-            "DEDICATED_ACCOUNT",
-          metadata: event.data,
-        });
+      const funding = await FundingTransaction.create({
+        user: virtualAccount.user,
+        wallet: virtualAccount.user,
+        amount,
+        reference,
+        providerTransactionId: event.data.id,
+        status: "SUCCESS",
+        channel: "DEDICATED_ACCOUNT",
+        metadata: event.data,
+      });
 
-      // Ledger credit 
+      if (funding.isProcessed) {
+        return res.sendStatus(200);
+      }
+
+      // Ledger credit
       await transferFunds({
         transactionId: reference,
-        fromWallet:
-          process.env.SETTLEMENT_ACCOUNT,
+        fromWallet: process.env.SETTLEMENT_ACCOUNT,
         toWallet: virtualAccount.user,
         amount,
       });
@@ -82,7 +81,7 @@ const handleWebhook = async (req, res) => {
         { reference },
         {
           status: "FAILED",
-        }
+        },
       );
     }
 
@@ -93,15 +92,12 @@ const handleWebhook = async (req, res) => {
         {
           status: "SUCCESS",
           processedAt: new Date(),
-        }
+        },
       );
     }
 
     // mark processed
-    await WebhookEvent.updateOne(
-      { eventId },
-      { processedAt: new Date() }
-    );
+    await WebhookEvent.updateOne({ eventId }, { processedAt: new Date() });
 
     return res.sendStatus(200);
   } catch (error) {

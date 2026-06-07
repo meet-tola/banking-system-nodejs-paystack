@@ -35,7 +35,6 @@ const FundingTransactionSchema = new mongoose.Schema(
     reference: {
       type: String,
       required: true,
-      index: true,
     },
 
     providerTransactionId: {
@@ -77,16 +76,10 @@ const FundingTransactionSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
-  }
+  },
 );
 
 // Prevent duplicate deposits from Paystack retries
-FundingTransactionSchema.index(
-  { reference: 1 },
-  { unique: true }
-);
+FundingTransactionSchema.index({ reference: 1 }, { unique: true });
 
-module.exports = mongoose.model(
-  "FundingTransaction",
-  FundingTransactionSchema
-);
+module.exports = mongoose.model("FundingTransaction", FundingTransactionSchema);

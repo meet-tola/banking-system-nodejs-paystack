@@ -1,0 +1,118 @@
+version: '3.8'
+
+services:
+  # Apache Kafka Broker
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: banking-kafka
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: banking-redis
+    ports:
+      - "6379:6379"
+
+  # API Gateway Service 
+  gateway-service:
+    build: ./gateway-service
+    container_name: gateway-service
+    ports:
+      - "3000:3000"
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+      - REDIS_URL=redis://redis:6379
+      - AUTH_SERVICE_URL=http://auth-service:3001
+      - WALLET_SERVICE_URL=http://wallet-service:3002
+      - LEDGER_SERVICE_URL=http://ledger-service:3003
+      - TRANSACTION_SERVICE_URL=http://transaction-service:3004
+      - PAYSTACK_SERVICE_URL=http://transaction-service:3005
+      - FRAUD_DETECTION_SERVICE_URL=http://transaction-service:3006
+
+    depends_on:
+      - kafka
+      - redis
+      - auth-service
+      - wallet-service
+      - transaction-service
+
+  # Authentication Service
+  auth-service:
+    build: ./auth-service
+    container_name: auth-service
+    ports:
+      - "3001:3001"
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+
+  # Wallet Service
+  wallet-service:
+    build: ./wallet-service
+    container_name: wallet-service
+    ports:
+      - "3002:3002"
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+    depends_on:
+      - kafka
+
+  # Paystack Service
+  ledger-service:
+    build: ./ledger-service
+    container_name: ledger-service
+    ports:
+      - "3003:3003"
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+    depends_on:
+      - kafka
+  
+  paystack-service:
+    build: ./paystack-service
+    container_name: paystack-service
+    ports:
+      - "3005:3005"
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+    depends_on:
+      - kafka
+
+  # Transaction Service
+  transaction-service:
+    build: ./transaction-service
+    container_name: transaction-service
+    ports:
+      - "3004:3004"
+    environment:
+      - PORT=3004
+      - KAFKA_BROKERS=kafka:29092
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - kafka
+      - redis
+
+  # Fraud Server Worker
+  fraud-detection-service:
+    build: ./fraud-detection-service
+    container_name: fraud-service
+    ports:
+      - "3006:3006"
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - kafka
+      - redis

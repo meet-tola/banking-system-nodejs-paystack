@@ -8,7 +8,12 @@ const walletSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
-
+    accountNumber: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+    },
     status: {
       type: String,
       enum: ["ACTIVE", "FROZEN", "BLOCKED"],
@@ -27,6 +32,7 @@ const walletSchema = new mongoose.Schema(
 );
 
 walletSchema.index({ user: 1, status: 1 });
+walletSchema.index({ accountNumber: 1 });
 
 const Wallet = mongoose.model("Wallet", walletSchema);
 

@@ -18,5 +18,10 @@ logs
 dist/
 build/
 
+# certificates and keys
+*.key
+*.pem
+*.cert
+
 # OS files
 .DS_Store

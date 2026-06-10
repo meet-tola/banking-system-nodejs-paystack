@@ -3,7 +3,6 @@ require("dotenv").config({
 });
 const express = require("express");
 const helmet = require("helmet");
-const cors = require("cors");
 
 const walletRoutes = require("./routes/wallet-route");
 const errorHandler = require("./middleware/error-handler");
@@ -27,7 +26,6 @@ connectDB();
 
 // Security middleware
 app.use(helmet());
-app.use(cors());
 
 app.use(express.json());
 

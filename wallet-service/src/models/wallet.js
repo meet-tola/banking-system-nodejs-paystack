@@ -25,14 +25,18 @@ const walletSchema = new mongoose.Schema(
       required: true,
       default: "NGN",
     },
+    pin: {
+      type: String,
+      required: false, 
+      select: false,
+    },
   },
   {
     timestamps: true,
   },
 );
 
-walletSchema.index({ user: 1, status: 1 });
-walletSchema.index({ accountNumber: 1 });
+walletSchema.index({ user: 1, status: 1, accountNumber: 1 });
 
 const Wallet = mongoose.model("Wallet", walletSchema);
 

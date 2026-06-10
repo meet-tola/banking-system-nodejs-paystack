@@ -1,100 +1,145 @@
+require("dotenv").config({
+  path: require("path").resolve(__dirname, "../.env"),
+});
 const axios = require("axios");
 const Transaction = require("../models/transaction");
 const logger = require("../utils/logger");
 const { transferFunds, getBalance } = require("../services/ledger-service");
-const { getWalletById } = require("../services/wallet-service");
+const { getWalletByAccount } = require("../services/wallet-service");
 const { publishEvent } = require("../utils/kafka-producer");
 
 const createTransaction = async (req, res) => {
-  logger.info("Create Transaction endpoint hit");
+  const { fromAccount, toAccount, amount, idempotencyKey, pin } = req.body;
+  const logCtx = `[Tx-IK: ${idempotencyKey}]`;
 
   try {
-    const { fromAccount, toAccount, amount, idempotencyKey } = req.body;
-
-    // Validate Input
-    if (!fromAccount || !toAccount || !amount || !idempotencyKey) {
+    if (!fromAccount || !toAccount || !amount || !idempotencyKey || !pin) {
+      logger.warn(
+        `${logCtx} Validation failed: Missing required transactional fields.`,
+      );
       return res.status(400).json({
         success: false,
         message:
-          "fromAccount, toAccount, amount and idempotencyKey are required",
+          "fromAccount, toAccount, amount, idempotencyKey, and pin are required",
       });
     }
 
-    // Check Idempotency
+    // Check Idempotency Cache
     const isTransactionAlreadyExists = await Transaction.findOne({
       idempotencyKey,
     });
-
     if (isTransactionAlreadyExists) {
+      logger.info(
+        `${logCtx} Idempotency hit. Status: ${isTransactionAlreadyExists.status}`,
+      );
       if (isTransactionAlreadyExists.status === "COMPLETED") {
         return res.status(200).json({
           message: "Transaction already processed",
           transaction: isTransactionAlreadyExists,
         });
       }
-
       if (isTransactionAlreadyExists.status === "PENDING") {
-        return res.status(200).json({
-          message: "Transaction is still processing",
-        });
+        return res
+          .status(200)
+          .json({ message: "Transaction is still processing" });
       }
-
       if (isTransactionAlreadyExists.status === "FAILED") {
-        return res.status(500).json({
-          message: "Previous transaction failed.",
-        });
+        return res
+          .status(500)
+          .json({ message: "Previous transaction failed." });
       }
     }
 
-    // Get wallets
-    const senderWallet = await getWalletById(fromAccount);
-    const receiverWallet = await getWalletById(toAccount);
+    // Fetch sender/receiver wallets
+    const senderWallet = await getWalletByAccount(fromAccount);
+    const receiverWallet = await getWalletByAccount(toAccount);
 
-    if (!senderWallet) {
-      throw new Error("Sender wallet not found");
-    }
-
-    if (!receiverWallet) {
-      throw new Error("Receiver wallet not found");
+    if (!senderWallet || !receiverWallet) {
+      logger.warn(
+        `${logCtx} Account lookup failed. Sender found: ${!!senderWallet}, Receiver found: ${!!receiverWallet}`,
+      );
+      return res.status(404).json({
+        success: false,
+        message: !senderWallet
+          ? "Sender wallet not found"
+          : "Receiver wallet not found",
+      });
     }
 
     // Verify Sender Owns Wallet
     if (senderWallet.user.toString() !== req.user.userId) {
-      logger.error("You are not authorized to use this wallet");
-
+      logger.error(
+        `${logCtx} Unauthorized: Actor ${req.user.userId} does not own wallet ${fromAccount}`,
+      );
       return res.status(403).json({
         success: false,
         message: "You are not authorized to use this wallet",
       });
     }
 
-    // Verify wallet status
-    if (senderWallet.status !== "ACTIVE") {
-      logger.error("Sender wallet is not active");
+    // Secure PIN execution check over microservice mesh
+    try {
+      const pinVerificationResponse = await axios.post(
+        `${process.env.WALLET_SERVICE_URL}/api/wallet/verify-pin`,
+        { accountNumber: fromAccount, pin },
+        {
+          headers: {
+            "x-internal-service-token": process.env.INTERNAL_SERVICE_TOKEN,
+          },
+          timeout: 5000,
+        },
+      );
 
+      if (
+        !pinVerificationResponse.data ||
+        !pinVerificationResponse.data.valid
+      ) {
+        logger.warn(
+          `${logCtx} Invalid PIN verification submission for account: ${fromAccount}`,
+        );
+        return res.status(401).json({
+          success: false,
+          message: "Transaction failed. Incorrect transaction PIN.",
+        });
+      }
+    } catch (pinError) {
+      logger.error(
+        `${logCtx} PIN verification network link exception: ${pinError.message}`,
+      );
+      return res
+        .status(502)
+        .json({ success: false, message: "Security check unavailable" });
+    }
+
+    // Verify wallet status records
+    if (
+      senderWallet.status !== "ACTIVE" ||
+      receiverWallet.status !== "ACTIVE"
+    ) {
+      logger.warn(
+        `${logCtx} Status restriction. Sender: ${senderWallet.status}, Receiver: ${receiverWallet.status}`,
+      );
       return res.status(400).json({
         success: false,
-        message: "Sender wallet is not active",
+        message:
+          senderWallet.status !== "ACTIVE"
+            ? "Sender wallet is inactive"
+            : "Receiver wallet is inactive",
       });
     }
 
-    if (receiverWallet.status !== "ACTIVE") {
-      return res.status(400).json({
-        success: false,
-        message: "Receiver wallet is not active",
-      });
-    }
-
-    const balance = await getBalance(fromAccount);
-
+    // Balance evaluation check against ledger records
+    const balance = await getBalance(senderWallet);
     if (balance < amount) {
-      return res.status(400).json({
-        success: false,
-        message: "Insufficient balance",
-      });
+      logger.warn(
+        `${logCtx} Overdraft rejected. Required: ₦${amount} | Available: ₦${balance}`,
+      );
+      return res
+        .status(400)
+        .json({ success: false, message: "Insufficient balance" });
     }
 
-    // Create Transaction
+    // Instantiate Pending Database Document Node
     const transaction = await Transaction.create({
       fromAccount,
       toAccount,
@@ -103,72 +148,55 @@ const createTransaction = async (req, res) => {
       status: "PENDING",
     });
 
-    logger.info("Transaction created successfully");
-
-    // Unified context extracted for device identity verification layer
     const contextMeta = {
       ip: req.ip,
       deviceId: req.headers["x-device-id"],
-      userAgent: req.headers["user-agent"]
+      userAgent: req.headers["user-agent"],
     };
 
-    // Emit 'transaction.created' Event
-    await publishEvent('transaction-events', fromAccount, {
-      eventType: "transaction.created",
-      payload: {
-        transactionId: transaction._id,
-        fromAccount,
-        toAccount,
-        amount,
-        userId: req.user.userId
-      },
-      context: contextMeta
-    });
-
-    // Call Ledger Service
+    // Dispatch asset settlement allocation execution
     try {
       const result = await transferFunds({
         transactionId: transaction._id,
-        fromWallet: fromAccount,
-        toWallet: toAccount,
+        fromWallet: senderWallet._id,
+        toWallet: receiverWallet._id,
         amount,
       });
 
-      if (!result.success) {
-        logger.error("Ledger failed");
-      }
-
-      // Update Transaction Status
       transaction.status = "COMPLETED";
       await transaction.save();
+      logger.info(
+        `${logCtx} Secure transfer complete. Allocated ₦${amount} from wallet ${senderWallet._id} to wallet ${receiverWallet._id}`,
+      );
 
-      // Emit 'transaction.completed' Event 
-      await publishEvent('transaction-events', fromAccount, {
+      publishEvent("transaction-events", fromAccount, {
         eventType: "transaction.completed",
         payload: {
           transactionId: transaction._id,
           fromAccount,
           toAccount,
           amount,
-          userId: req.user.userId
+          userId: req.user.userId,
         },
-        context: contextMeta
-      });
+        context: contextMeta,
+      }).catch((e) =>
+        logger.error(`${logCtx} Kafka success emission failed:`, e.message),
+      );
 
-      // Return Success
       return res.status(201).json({
         success: true,
         message: "Transaction completed successfully",
         data: transaction,
       });
     } catch (ledgerError) {
-      logger.error("Ledger transfer failed", ledgerError);
+      logger.error(
+        `${logCtx} Core ledger engine execution failure: ${ledgerError.message}`,
+      );
 
       transaction.status = "FAILED";
       await transaction.save();
 
-      // Emit 'transaction.failed' Event (Triggers failure tracking velocity limits)
-      await publishEvent('transaction-events', fromAccount, {
+      publishEvent("transaction-events", fromAccount, {
         eventType: "transaction.failed",
         payload: {
           transactionId: transaction._id,
@@ -176,80 +204,84 @@ const createTransaction = async (req, res) => {
           toAccount,
           amount,
           userId: req.user.userId,
-          reason: ledgerError.message || "Ledger processing error"
+          reason: ledgerError.message,
         },
-        context: contextMeta
-      });
+        context: contextMeta,
+      }).catch((e) =>
+        logger.error(`${logCtx} Kafka failure emission failed:`, e.message),
+      );
 
-      return res.status(400).json({
-        success: false,
-        message: "Transaction failed",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "Transaction processing failed" });
     }
   } catch (error) {
-    logger.error("Error creating transaction", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+    logger.error(
+      `${logCtx} Unhandled top-level transaction controller failure:`,
+      error.message || error,
+    );
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
   }
 };
 
 const getTransactionById = async (req, res) => {
-  logger.info("Get Transaction endpoint hit");
-
   try {
     const transaction = await Transaction.findById(req.params.id);
-
     if (!transaction) {
-      logger.error("Transaction not found");
-
-      return res.status(404).json({
-        success: false,
-        message: "Transaction not found",
-      });
+      return res
+        .status(404)
+        .json({ success: false, message: "Transaction not found" });
     }
-    return res.json({
-      success: true,
-      data: transaction,
-    });
+    return res.json({ success: true, data: transaction });
   } catch (error) {
-    logger.error("Error getting transaction", error);
-
-    return res.status(500).json({
-      success: false,
-      message: error.message,
-    });
+    logger.error(`Error fetching transaction ${req.params.id}:`, error.message);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
   }
 };
 
 const getAllTransactions = async (req, res) => {
-  logger.info("Get All Transactions endpoint hit");
-
   try {
     const { status, fromAccount, toAccount } = req.query;
+    const pageCount = parseInt(req.query.page) || 1;
+    const limitCount = parseInt(req.query.limit) || 20;
+    const skipThreshold = (pageCount - 1) * limitCount;
 
-    const filter = {};
-
+    let filter = {};
     if (status) filter.status = status;
-    if (fromAccount) filter.fromAccount = fromAccount;
-    if (toAccount) filter.toAccount = toAccount;
 
-    const transactions = await Transaction.find(filter).sort({ createdAt: -1 });
+    if (fromAccount && !toAccount) {
+      filter.$or = [{ fromAccount: fromAccount }, { toAccount: fromAccount }];
+    } else {
+      if (fromAccount) filter.fromAccount = fromAccount;
+      if (toAccount) filter.toAccount = toAccount;
+    }
+
+    const totalCount = await Transaction.countDocuments(filter);
+    const transactions = await Transaction.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skipThreshold)
+      .limit(limitCount);
 
     return res.json({
       success: true,
       count: transactions.length,
+      pagination: {
+        totalCount,
+        totalPages: Math.ceil(totalCount / limitCount),
+        currentPage: pageCount,
+        limit: limitCount,
+      },
       data: transactions,
     });
   } catch (error) {
-    logger.error("Error getting all transaction", error);
-
-    return res.status(500).json({
-      success: false,
-      message: error.message,
-    });
+    logger.error("Error fetching historical transaction logs:", error.message);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
   }
 };
 

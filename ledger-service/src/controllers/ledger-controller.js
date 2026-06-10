@@ -4,45 +4,32 @@ const logger = require("../utils/logger");
 
 const getBalance = async (req, res) => {
   try {
-    const walletId = req.params.walletId;
+    const walletId = new mongoose.Types.ObjectId(req.params.walletId);
 
-    const credits = await Ledger.aggregate([
+    const result = await Ledger.aggregate([
       {
-        $match: {
-          walletId,
-          type: "CREDIT",
-        },
+        $match: { walletId },
       },
       {
         $group: {
           _id: null,
-          total: {
-            $sum: "$amount",
+          totalCredits: {
+            $sum: {
+              $cond: [{ $eq: ["$type", "CREDIT"] }, "$amount", 0],
+            },
+          },
+          totalDebits: {
+            $sum: {
+              $cond: [{ $eq: ["$type", "DEBIT"] }, "$amount", 0],
+            },
           },
         },
       },
     ]);
 
-    const debits = await Ledger.aggregate([
-      {
-        $match: {
-          walletId,
-          type: "DEBIT",
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          total: {
-            $sum: "$amount",
-          },
-        },
-      },
-    ]);
-
-    const totalCredits = credits[0]?.total || 0;
-    const totalDebits = debits[0]?.total || 0;
-
+    // 3. Fallback to 0 if no transactions exist yet
+    const totalCredits = result[0]?.totalCredits || 0;
+    const totalDebits = result[0]?.totalDebits || 0;
     const balance = totalCredits - totalDebits;
 
     return res.json({

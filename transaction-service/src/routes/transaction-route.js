@@ -12,7 +12,8 @@ const router = express.Router();
 router.use(authenticateRequest);
 
 router.post("/create", createTransaction);
+router.get("/all", getAllTransactions);
 router.get("/:id", getTransactionById);
-router.get("/", getAllTransactions);
+
 
 module.exports = router;

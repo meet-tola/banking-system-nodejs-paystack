@@ -3,16 +3,14 @@ const mongoose = require("mongoose");
 const transactionSchema = new mongoose.Schema(
   {
     fromAccount: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Wallet",
+      type: String, 
       required: true,
-      index: true,
+      trim: true,
     },
     toAccount: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Wallet",
+      type: String,
       required: true,
-      index: true,
+      trim: true,
     },
     status: {
       type: String,

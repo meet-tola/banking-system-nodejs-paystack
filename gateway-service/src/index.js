@@ -5,6 +5,7 @@ require("dotenv").config({
 const express = require("express");
 const helmet = require("helmet");
 const cors = require("cors");
+const cookieParser = require("cookie-parser");
 
 const logger = require("./utils/logger");
 
@@ -20,6 +21,7 @@ const {
   fraudDetectionProxy,
   paystackProxy,
 } = require("./proxy/proxy");
+const contextMiddleware = require("./middleware/context-middleware");
 
 // Initialize Redis connection
 require("./config/redis");
@@ -29,10 +31,18 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Security middleware
-app.use(helmet());
-app.use(cors());
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL || "http://localhost:3007", 
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Request-ID", "X-Device-ID", "X-Client-Version"]
+  })
+);
 
+app.use(helmet());
 app.use(express.json());
+app.use(cookieParser());
 
 // Logger middleware
 app.use((req, res, next) => {
@@ -52,8 +62,12 @@ app.use((req, res, next) => {
 // Rate limiting
 app.use(apiLimiter);
 
+app.use(contextMiddleware);
+
 // Proxy routes
 app.use("/v1/auth", authProxy);
+app.use("/v1/mfa", authProxy);
+app.use("/v1/user", validateToken, authProxy);
 app.use("/v1/wallet", validateToken, walletProxy);
 app.use("/v1/ledger", validateToken, ledgerProxy);
 app.use("/v1/transaction", validateToken, transactionProxy);

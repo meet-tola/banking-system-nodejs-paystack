@@ -3,7 +3,7 @@ require("dotenv").config({
 });
 const express = require("express");
 const helmet = require("helmet");
-const cors = require("cors");
+const cookieParser = require("cookie-parser");
 
 const authRoutes = require("./routes/auth-route");
 const mfaRoutes = require("./routes/mfa-route");
@@ -17,6 +17,7 @@ const {
 
 const logger = require("./utils/logger");
 const connectDB = require("./config/db");
+const { connectKafka } = require("./utils/kafka-producer");
 
 // Initialize Redis connection
 require("./config/redis");
@@ -25,20 +26,21 @@ const app = express();
 
 const PORT = process.env.PORT || 3001;
 
-// Connect databse
+// Connect database & microservice events
 connectDB();
+connectKafka();
 
 // Security middleware
 app.use(helmet());
-app.use(cors());
 
 app.use(express.json());
+app.use(cookieParser());
 
 // Logger middleware
 app.use((req, res, next) => {
   logger.info(`Received ${req.method} request to ${req.url}`);
 
-  if (Object.keys(req.body).length) {
+  if (req.body && typeof req.body === "object" && Object.keys(req.body).length > 0) {
     logger.info(`Request Body: ${JSON.stringify(req.body)}`);
   }
 
@@ -55,7 +57,7 @@ app.use("/api/auth/login", sensitiveEndpointsLimiter);
 // Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/mfa", mfaRoutes);
-app.use("/api/auth", userRoutes);
+app.use("/api/user", userRoutes);
 
 // Error handler
 app.use(errorHandler);

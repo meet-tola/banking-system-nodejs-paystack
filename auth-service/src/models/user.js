@@ -66,7 +66,7 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
   return argon2.verify(this.password, candidatePassword);
 };
 
-userSchema.index({ fullName: "text", email: "text" });
+userSchema.index({ fullName: 1, email: 1 });
 
 const User = mongoose.model("User", userSchema);
 module.exports = User;

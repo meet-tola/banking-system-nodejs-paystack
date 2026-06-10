@@ -3,24 +3,19 @@ require("dotenv").config({
 });
 
 const jwt = require("jsonwebtoken");
-
 const User = require("../models/user");
 const RefreshToken = require("../models/refresh-token");
-
 const redis = require("../config/redis");
 const logger = require("../utils/logger");
-
 const generateToken = require("../utils/generate-token");
-
 const { validateRegistration, validateLogin } = require("../utils/validation");
-
 const { sendOtpEmail } = require("../services/email-service");
-
-const { calculateRisk, generateOtp } = require("../utils/auth-utils");
-
+const {
+  calculateRisk,
+  generateOtp,
+  getDeviceAndLocation,
+} = require("../utils/auth-utils");
 const { v4: uuidv4 } = require("uuid");
-
-// Require Kafka producer to pipeline state to fraud context
 const { publishEvent } = require("../utils/kafka-producer");
 
 // REGISTER
@@ -64,12 +59,11 @@ const registerUser = async (req, res) => {
 
     logger.info(`Signup OTP sent: ${user._id}`);
 
-    // Emit 'UserRegistered' to construct local Fraud Profile read-model
     await publishEvent("user-auth", user._id, {
       eventType: "UserRegistered",
       userId: user._id,
       email: user.email,
-      ip: req.ip
+      ip: req.ip,
     });
 
     return res.status(201).json({
@@ -79,7 +73,6 @@ const registerUser = async (req, res) => {
     });
   } catch (err) {
     logger.error("Register error", err);
-
     return res.status(500).json({
       success: false,
       message: "Internal server error",
@@ -93,6 +86,8 @@ const verifyRegisterOtp = async (req, res) => {
 
   try {
     const { userId, otp } = req.body;
+    const deviceId =
+      req.body.deviceId || req.headers["x-device-id"] || uuidv4();
 
     if (!userId || !otp) {
       return res.status(400).json({
@@ -120,32 +115,30 @@ const verifyRegisterOtp = async (req, res) => {
     }
 
     user.isVerified = true;
-
-    const deviceId = uuidv4();
     const userAgent = req.headers["user-agent"];
 
     user.devices = user.devices || [];
-
-    user.devices.push({
-      deviceId,
-      ip: req.ip,
-      userAgent,
-      createdAt: new Date(),
-    });
+    const deviceExists = user.devices.some((d) => d.deviceId === deviceId);
+    if (!deviceExists) {
+      user.devices.push({
+        deviceId,
+        ip: req.ip,
+        userAgent,
+        createdAt: new Date(),
+      });
+    }
 
     await user.save();
     await redis.del(`signup_otp:${userId}`);
 
-    const tokens = await generateToken(user, deviceId, req.ip, userAgent);
+    await generateToken(user, deviceId, req.ip, userAgent, res);
 
     return res.json({
       success: true,
       message: "Account verified successfully",
-      ...tokens,
     });
   } catch (err) {
     logger.error("Verify signup OTP error", err);
-
     return res.status(500).json({
       success: false,
       message: "Internal server error",
@@ -156,7 +149,6 @@ const verifyRegisterOtp = async (req, res) => {
 // RESEND SIGNUP OTP
 const resendRegisterOtp = async (req, res) => {
   const { email } = req.body;
-
   const user = await User.findOne({ email });
 
   if (!user) {
@@ -164,13 +156,10 @@ const resendRegisterOtp = async (req, res) => {
   }
 
   if (user.isVerified) {
-    return res.status(400).json({
-      message: "User already verified",
-    });
+    return res.status(400).json({ message: "User already verified" });
   }
 
   const otp = generateOtp();
-
   await redis.setex(`signup_otp:${user._id}`, 300, otp);
   await sendOtpEmail(user.email, otp);
 
@@ -194,7 +183,6 @@ const loginUser = async (req, res) => {
     }
 
     const { email, password } = req.body;
-
     const user = await User.findOne({ email });
 
     if (!user || !(await user.comparePassword(password))) {
@@ -215,69 +203,73 @@ const loginUser = async (req, res) => {
     const userAgent = req.headers["user-agent"];
 
     if (!deviceId) {
-      return res.status(400).json({
-        success: false,
-        message: "Device ID required",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "Device ID required" });
     }
 
-    const risk = calculateRisk({
-      user,
-      deviceId,
-      ip: req.ip,
-    });
+    user.devices = user.devices || [];
+    const isNewDevice = !user.devices.some((d) => d.deviceId === deviceId);
 
-    logger.info(`Risk score: ${risk}`);
+    const risk = calculateRisk({ user, deviceId, ip: req.ip });
+    logger.info(`Risk score: ${risk}, Is New Device: ${isNewDevice}`);
 
-    // Check High risk
     if (risk >= 80) {
-      return res.status(403).json({
-        success: false,
-        message: "Suspicious login blocked",
-      });
+      return res
+        .status(403)
+        .json({ success: false, message: "Suspicious login blocked" });
     }
 
     const otp = generateOtp();
 
-    // MFA is required
-    if (user.mfaEnabled || (risk > 30 && risk < 80)) {
+    if (user.mfaEnabled || (risk > 30 && risk < 80) || isNewDevice) {
+      const { deviceName, locationStr } = await getDeviceAndLocation(req);
+
       const mfaToken = jwt.sign(
-        {
-          userId: user._id,
-          deviceId,
-          stage: "MFA_PENDING",
-        },
+        { userId: user._id, deviceId, stage: "MFA_PENDING" },
         process.env.JWT_SECRET,
         { expiresIn: "10m" },
       );
 
       await redis.setex(`login_otp:${user._id}`, 300, otp);
-      await sendOtpEmail(user.email, otp);
+
+      sendOtpEmail(user.email, otp, {
+        isNewDevice,
+        deviceName,
+        locationStr,
+        userId: user._id,
+      }).catch((emailErr) => {
+        logger.error(
+          `[Background Email Worker Failure] Failed to deliver MFA OTP to ${user.email}:`,
+          emailErr.message,
+        );
+      });
+
+      logger.info("OTP for email", otp);
 
       return res.json({
         success: true,
         mfaRequired: true,
         mfaToken,
         userId: user._id,
-        message: "MFA OTP sent",
+        message: isNewDevice
+          ? "New device detected. Verification OTP sent."
+          : "MFA OTP sent",
       });
     }
 
-    // Check Low risk login
-    const tokens = await generateToken(user, deviceId, req.ip, userAgent);
+    await generateToken(user, deviceId, req.ip, userAgent, res);
 
     logger.info(`Login success: ${user._id}`);
 
-    // Emit 'UserLoggedIn' directly to trigger device & IP geolocation risk verification loops
     await publishEvent("user-auth", user._id, {
       eventType: "UserLoggedIn",
       payload: { userId: user._id, email: user.email },
-      context: { ip: req.ip, deviceId, userAgent }
+      context: { ip: req.ip, deviceId, userAgent },
     });
 
     return res.json({
       success: true,
-      ...tokens,
       user: {
         id: user._id,
         email: user.email,
@@ -285,7 +277,6 @@ const loginUser = async (req, res) => {
     });
   } catch (err) {
     logger.error("Login error", err);
-
     return res.status(500).json({
       success: false,
       message: "Internal server error",
@@ -298,7 +289,8 @@ const verifyLoginOtp = async (req, res) => {
   logger.info("Verify login OTP hit");
 
   try {
-    const { userId, otp, deviceId } = req.body;
+    const { userId, otp } = req.body;
+    const deviceId = req.body.deviceId || req.headers["x-device-id"];
 
     if (!userId || !otp || !deviceId) {
       return res.status(400).json({
@@ -326,35 +318,26 @@ const verifyLoginOtp = async (req, res) => {
     }
 
     user.devices = user.devices || [];
+    const deviceExists = user.devices.some((d) => d.deviceId === deviceId);
 
-    user.devices.push({
-      deviceId,
-      ip: req.ip,
-      createdAt: new Date(),
-    });
+    if (!deviceExists) {
+      user.devices.push({
+        deviceId,
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+        createdAt: new Date(),
+      });
+    }
 
     user.lastLoginIp = req.ip;
-
     await user.save();
     await redis.del(`login_otp:${userId}`);
 
-    const tokens = await generateToken(
-      user,
-      deviceId,
-      req.ip,
-      req.headers["user-agent"],
-    );
-
-    // Emit 'UserLoggedIn' on successful MFA step conversion
-    await publishEvent("user-auth", user._id, {
-      eventType: "UserLoggedIn",
-      payload: { userId: user._id, email: user.email },
-      context: { ip: req.ip, deviceId, userAgent: req.headers["user-agent"] }
-    });
+    await generateToken(user, deviceId, req.ip, req.headers["user-agent"], res);
 
     return res.json({
       success: true,
-      ...tokens,
+      deviceId,
       user: {
         id: user._id,
         email: user.email,
@@ -362,7 +345,6 @@ const verifyLoginOtp = async (req, res) => {
     });
   } catch (err) {
     logger.error("Verify login OTP error", err);
-
     return res.status(500).json({
       success: false,
       message: "Internal server error",
@@ -376,36 +358,27 @@ const resendLoginOtp = async (req, res) => {
 
   try {
     const { mfaToken } = req.body;
-
     if (!mfaToken) {
-      return res.status(400).json({
-        success: false,
-        message: "mfaToken required",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "mfaToken required" });
     }
 
-    // verify MFA token
     const decoded = jwt.verify(mfaToken, process.env.JWT_SECRET);
-
     if (decoded.stage !== "MFA_PENDING") {
-      return res.status(403).json({
-        success: false,
-        message: "Invalid MFA stage",
-      });
+      return res
+        .status(403)
+        .json({ success: false, message: "Invalid MFA stage" });
     }
 
     const user = await User.findById(decoded.userId);
-
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
     }
 
-    // generate new OTP
     const otp = generateOtp();
-
     await redis.setex(`login_otp:${user._id}`, 300, otp);
     await sendOtpEmail(user.email, otp);
 
@@ -417,11 +390,9 @@ const resendLoginOtp = async (req, res) => {
     });
   } catch (err) {
     logger.error("Resend OTP error", err);
-
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
   }
 };
 
@@ -430,75 +401,66 @@ const refreshTokenUser = async (req, res) => {
   logger.info("Refresh token endpoint hit");
 
   try {
-    const { refreshToken } = req.body;
+    const refreshToken = req.cookies.refreshToken || req.body.refreshToken;
 
     if (!refreshToken) {
-      return res.status(401).json({
-        success: false,
-        message: "Refresh token missing",
-      });
+      return res
+        .status(401)
+        .json({ success: false, message: "Refresh token missing" });
     }
 
     const storedToken = await RefreshToken.findOne({ token: refreshToken });
 
     if (!storedToken) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid refresh token",
-      });
+      return res
+        .status(401)
+        .json({ success: false, message: "Invalid refresh token" });
     }
 
     if (storedToken.expiresAt < new Date()) {
       await RefreshToken.deleteOne({ _id: storedToken._id });
-
-      return res.status(401).json({
-        success: false,
-        message: "Refresh token expired",
-      });
+      return res
+        .status(401)
+        .json({ success: false, message: "Refresh token expired" });
     }
 
     const user = await User.findById(storedToken.user);
 
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
     }
 
-    const { accessToken, refreshToken: newRefreshToken } =
-      await generateToken(user);
+    const deviceId = req.headers["x-device-id"] || storedToken.deviceId;
+    const userAgent = req.headers["user-agent"] || storedToken.userAgent;
 
     await RefreshToken.deleteOne({ _id: storedToken._id });
 
+    await generateToken(user, deviceId, req.ip, userAgent, res);
+
     return res.status(200).json({
       success: true,
-      accessToken,
-      refreshToken: newRefreshToken,
+      message: "Session tokens refreshed successfully.",
     });
   } catch (error) {
     logger.error("Refresh token error", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
   }
 };
 
 // LOGOUT
 const logoutUser = async (req, res) => {
   try {
-    const { refreshToken } = req.body;
+    const refreshToken = req.cookies.refreshToken || req.body.refreshToken;
 
-    if (!refreshToken) {
-      return res.status(400).json({
-        success: false,
-        message: "Refresh token required",
-      });
+    if (refreshToken) {
+      await RefreshToken.deleteOne({ token: refreshToken });
     }
-
-    await RefreshToken.deleteOne({ token: refreshToken });
+    res.clearCookie("accessToken");
+    res.clearCookie("refreshToken");
 
     return res.json({
       success: true,
@@ -506,11 +468,9 @@ const logoutUser = async (req, res) => {
     });
   } catch (err) {
     logger.error("Logout error", err);
-
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
   }
 };
 
@@ -518,19 +478,14 @@ const logoutUser = async (req, res) => {
 const logoutAllDevices = async (req, res) => {
   try {
     if (!req.user?.userId) {
-      return res.status(401).json({
-        success: false,
-        message: "Unauthorized",
-      });
+      return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
     const user = await User.findById(req.user.userId);
-
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
     }
 
     user.devices = [];
@@ -538,34 +493,125 @@ const logoutAllDevices = async (req, res) => {
 
     await RefreshToken.deleteMany({ user: user._id });
 
+    res.clearCookie("accessToken");
+    res.clearCookie("refreshToken");
+
     return res.json({
       success: true,
       message: "Logged out all devices",
     });
   } catch (err) {
     logger.error("Logout all error", err);
-
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
   }
 };
 
+// CHANGE PASSWORD
+const changePassword = async (req, res) => {
+  logger.info("Change password endpoint hit");
 
-const changePasswordSimulation = async (req, res) => {
   try {
-    const { userId } = req.body;
-    
-    // Broadcast 'PasswordChanged' event sequence to trigger the fraud chaining rule
+    const userId = req.user?.userId;
+    const { currentPassword, newPassword } = req.body;
+
+    if (!userId || !currentPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "Current password and new password are required",
+      });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    const isMatch = await user.comparePassword(currentPassword);
+    if (!isMatch) {
+      return res
+        .status(401)
+        .json({ success: false, message: "Incorrect current password" });
+    }
+
+    user.password = newPassword;
+    await user.save();
+
+    logger.info(`Password changed successfully for user: ${userId}`);
+
     await publishEvent("user-auth", userId, {
       eventType: "PasswordChanged",
-      userId
+      userId,
+      context: { ip: req.ip, userAgent: req.headers["user-agent"] },
     });
 
-    return res.json({ success: true, message: "Password updated successfully" });
+    return res.json({
+      success: true,
+      message: "Password updated successfully",
+    });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    logger.error("Change password error", err);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
+  }
+};
+
+// RESET PASSWORD
+const resetPassword = async (req, res) => {
+  logger.info("Reset password endpoint hit");
+
+  try {
+    const { userId, otp, newPassword } = req.body;
+
+    if (!userId || !otp || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "userId, otp, and newPassword are required",
+      });
+    }
+
+    const storedOtp = await redis.get(`reset_otp:${userId}`);
+    if (!storedOtp || storedOtp.trim() !== otp.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired reset OTP",
+      });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    user.password = newPassword;
+    await user.save();
+
+    await redis.del(`reset_otp:${userId}`);
+
+    logger.info(`Password reset successfully via OTP for user: ${userId}`);
+
+    await publishEvent("user-auth", userId, {
+      eventType: "PasswordReset",
+      userId,
+      context: { ip: req.ip, userAgent: req.headers["user-agent"] },
+    });
+
+    return res.json({
+      success: true,
+      message:
+        "Password reset successful. You can now log in with your new password.",
+    });
+  } catch (err) {
+    logger.error("Reset password error", err);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
   }
 };
 
@@ -579,5 +625,6 @@ module.exports = {
   logoutAllDevices,
   resendLoginOtp,
   resendRegisterOtp,
-  changePasswordSimulation
+  changePassword,
+  resetPassword,
 };

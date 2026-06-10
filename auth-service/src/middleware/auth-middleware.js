@@ -4,21 +4,48 @@ require("dotenv").config({
 const jwt = require("jsonwebtoken");
 
 const authenticateRequest = (req, res, next) => {
-  const authHeader = req.headers.authorization;
+  const internalToken = req.headers["x-internal-service-token"];
+  const isInternalService = internalToken && internalToken === process.env.INTERNAL_SERVICE_TOKEN;
 
-  if (!authHeader) {
-    return res.status(401).json({ message: "No token" });
+  let token = req.cookies ? req.cookies.accessToken : null;
+
+  if (!token && req.headers.authorization) {
+    const parts = req.headers.authorization.split(" ");
+    if (parts[0] === "Bearer") {
+      token = parts[1];
+    }
   }
+  if (!token) {
+    if (isInternalService) {
+      req.user = { role: "INTERNAL_SERVICE" };
+      return next();
+    }
 
-  const token = authHeader.split(" ")[1];
+    return res.status(401).json({
+      success: false,
+      message: "Access Denied: No authentication token found.",
+    });
+  }
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded; 
 
-    req.user = decoded; // includes userId + stage
+    if (isInternalService) {
+      req.user.role = "INTERNAL_SERVICE";
+    }
+
     next();
   } catch (err) {
-    return res.status(401).json({ message: "Invalid token" });
+    if (isInternalService) {
+      req.user = { role: "INTERNAL_SERVICE" };
+      return next();
+    }
+
+    return res.status(401).json({
+      success: false,
+      message: "Authentication failed: Token is invalid or expired.",
+    });
   }
 };
 

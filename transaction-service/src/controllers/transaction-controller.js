@@ -4,6 +4,7 @@ require("dotenv").config({
 const axios = require("axios");
 const Transaction = require("../models/transaction");
 const logger = require("../utils/logger");
+const { getUsersByIds } = require("../services/auth-service");
 const { transferFunds, getBalance } = require("../services/ledger-service");
 const { getWalletByAccount } = require("../services/wallet-service");
 const { publishEvent } = require("../utils/kafka-producer");
@@ -234,7 +235,60 @@ const getTransactionById = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Transaction not found" });
     }
-    return res.json({ success: true, data: transaction });
+
+    const [senderWallet, receiverWallet] = await Promise.all([
+      getWalletByAccount(transaction.fromAccount).catch(() => null),
+      getWalletByAccount(transaction.toAccount).catch(() => null),
+    ]);
+
+    const senderUserId = senderWallet?.user || senderWallet?.userId;
+    const receiverUserId = receiverWallet?.user || receiverWallet?.userId;
+
+    const userIdsToFetch = [...new Set([senderUserId, receiverUserId])].filter(
+      Boolean,
+    );
+
+    let senderInfo = null;
+    let receiverInfo = null;
+
+    if (userIdsToFetch.length > 0) {
+      try {
+        const users = await getUsersByIds(userIdsToFetch);
+        logger.info(users);
+
+        senderInfo =
+          users.find((u) => (u._id || u.id) === senderUserId.toString()) ||
+          null;
+        receiverInfo =
+          users.find((u) => (u._id || u.id) === receiverUserId.toString()) ||
+          null;
+      } catch (authError) {
+        logger.error(
+          `Failed to fetch user profiles for Tx ${req.params.id}: ${authError.message}`,
+        );
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        ...transaction.toObject(),
+        sender: senderInfo
+          ? {
+              id: senderUserId,
+              name: senderInfo.fullName,
+              email: senderInfo.email,
+            }
+          : null,
+        receiver: receiverInfo
+          ? {
+              id: receiverUserId,
+              name: receiverInfo.fullName,
+              email: receiverInfo.email,
+            }
+          : null,
+      },
+    });
   } catch (error) {
     logger.error(`Error fetching transaction ${req.params.id}:`, error.message);
     return res

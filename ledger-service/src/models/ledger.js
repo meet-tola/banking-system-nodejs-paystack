@@ -3,7 +3,7 @@ const mongoose = require("mongoose");
 const ledgerSchema = new mongoose.Schema(
   {
     walletId: {
-      type: String,
+      type: mongoose.Schema.Types.ObjectId,
       required: true,
       index: true,
       immutable: true,

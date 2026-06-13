@@ -7,18 +7,10 @@ const { searchUsers } = require("../services/user-search-service");
 // Create Wallet
 const createWallet = async (req, res) => {
   try {
-    // GENERATOR: Generates a 10-digit random string sequence
     let accountNumber = Math.floor(
       1000000000 + Math.random() * 9000000000,
     ).toString();
 
-    // =========================================================================
-    // ⚠️ VERY, VERY IMPORTANT PRODUCTION ARCHITECTURE NOTE
-    // =========================================================================
-    // Math.random() lacks mathematical uniqueness and CAN cause account number collisions.
-    // 1. You MUST enforce { unique: true } on the accountNumber field inside your Wallet Mongoose Schema.
-    // 2. The try/catch block below intercepts duplicate database keys to safely drop error warnings.
-    // =========================================================================
     let wallet;
     try {
       wallet = new Wallet({
@@ -27,7 +19,6 @@ const createWallet = async (req, res) => {
       });
       await wallet.save();
     } catch (dbError) {
-      // If code 11000 hits, it means the random account number already exists.
       if (dbError.code === 11000) {
         logger.warn(
           "Account collision caught. Re-generating alternative ledger account index...",
@@ -92,7 +83,6 @@ const getWalletBalance = async (req, res) => {
         .json({ success: false, message: "Wallet not found" });
     }
 
-    // Pass full wallet document context to extract real database _id parameters safely
     const balance = await getBalance(wallet);
 
     return res.json({
@@ -136,6 +126,8 @@ const getWalletByAccount = async (req, res) => {
 const autocompleteSearch = async (req, res) => {
   try {
     const { query } = req.query;
+    const currentUserId = req.user?.userId;
+
     if (!query) {
       return res
         .status(400)
@@ -147,18 +139,25 @@ const autocompleteSearch = async (req, res) => {
     const isNumericString = /^\d+$/.test(query);
 
     if (isNumericString) {
-      wallets = await Wallet.find({
+      const matchedWallets = await Wallet.find({
         accountNumber: { $regex: query, $options: "i" },
       });
+
+      wallets = matchedWallets.filter(
+        (w) => w.user.toString() !== currentUserId,
+      );
+
       const userIdsToFetch = wallets.map((w) => w.user.toString());
 
       if (userIdsToFetch.length > 0) {
         try {
           const userResponse = await fetchUsersByIds(userIdsToFetch);
-          if (userResponse.data?.success) {
-            userResponse.data.data.forEach((u) =>
-              dynamicUserMap.set(u._id.toString(), u),
-            );
+          const userData = userResponse.data?.data || userResponse.data;
+          const userSuccess =
+            userResponse.data?.success || userResponse.success;
+
+          if (userSuccess && Array.isArray(userData)) {
+            userData.forEach((u) => dynamicUserMap.set(u._id.toString(), u));
           }
         } catch (err) {
           logger.error(
@@ -171,10 +170,17 @@ const autocompleteSearch = async (req, res) => {
       let userIdsToFetchWallets = [];
       try {
         const userResponse = await searchUsers(query);
-        if (userResponse.data?.success) {
-          userResponse.data.data.forEach((u) => {
-            dynamicUserMap.set(u._id.toString(), u);
-            userIdsToFetchWallets.push(u._id);
+        const userData = userResponse.data?.data || userResponse.data;
+        const userSuccess = userResponse.data?.success || userResponse.success;
+
+        if (userSuccess && Array.isArray(userData)) {
+          userData.forEach((u) => {
+            const userIdStr = u._id.toString();
+
+            if (userIdStr !== currentUserId) {
+              dynamicUserMap.set(userIdStr, u);
+              userIdsToFetchWallets.push(u._id);
+            }
           });
         }
       } catch (error) {
@@ -189,11 +195,14 @@ const autocompleteSearch = async (req, res) => {
       }
     }
 
+    // Map remaining database elements to clean JSON objects
     const results = wallets.map((w) => {
       const correlatedUser = dynamicUserMap.get(w.user.toString());
       return {
         accountNumber: w.accountNumber,
-        fullName: correlatedUser ? correlatedUser.fullName : "System User",
+        fullName: correlatedUser
+          ? correlatedUser.fullName || correlatedUser.name
+          : "System User",
         email: correlatedUser ? correlatedUser.email : "",
         status: w.status,
       };
@@ -215,12 +224,10 @@ const createPin = async (req, res) => {
   try {
     const { pin } = req.body;
     if (!pin || typeof pin !== "string" || !/^\d{4}$/.test(pin)) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "Invalid PIN format. PIN must be exactly 4 digits.",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid PIN format. PIN must be exactly 4 digits.",
+      });
     }
 
     const wallet = await Wallet.findOne({ user: req.user.userId });
@@ -231,12 +238,10 @@ const createPin = async (req, res) => {
     }
 
     if (wallet.pin) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "PIN already set. Use update/reset endpoints instead.",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "PIN already set. Use update/reset endpoints instead.",
+      });
     }
 
     wallet.pin = await bcrypt.hash(pin, 10);
@@ -263,12 +268,10 @@ const updatePin = async (req, res) => {
   try {
     const { oldPin, newPin } = req.body;
     if (!oldPin || !newPin || !/^\d{4}$/.test(newPin)) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "Invalid old or new PIN configuration.",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid old or new PIN configuration.",
+      });
     }
 
     const wallet = await Wallet.findOne({ user: req.user.userId }).select(
@@ -306,23 +309,19 @@ const verifyInternalPin = async (req, res) => {
   try {
     const { accountNumber, pin } = req.body;
     if (!accountNumber || !pin) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message:
-            "Account number and 4-digit signature PIN are mandatory variables.",
-        });
+      return res.status(400).json({
+        success: false,
+        message:
+          "Account number and 4-digit signature PIN are mandatory variables.",
+      });
     }
 
     const wallet = await Wallet.findOne({ accountNumber }).select("+pin");
     if (!wallet || !wallet.pin) {
-      return res
-        .status(404)
-        .json({
-          success: false,
-          message: "Account number record could not be matched.",
-        });
+      return res.status(404).json({
+        success: false,
+        message: "Account number record could not be matched.",
+      });
     }
 
     const isPinValid = await bcrypt.compare(pin, wallet.pin);
@@ -339,12 +338,10 @@ const verifyInternalPin = async (req, res) => {
       "Fatal exception during internal transaction signing process:",
       error.message,
     );
-    return res
-      .status(500)
-      .json({
-        success: false,
-        message: "Internal ledger security module fault.",
-      });
+    return res.status(500).json({
+      success: false,
+      message: "Internal ledger security module fault.",
+    });
   }
 };
 

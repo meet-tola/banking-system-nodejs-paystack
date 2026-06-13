@@ -13,7 +13,6 @@ const getBalance = async (wallet) => {
       console.error("Ledger balance check aborted: No valid ID structure found on target wallet object.");
       return 0;
     }
-
     const response = await axios.get(
       `${process.env.LEDGER_SERVICE_URL}/api/ledger/${targetId}/balance`,
       {

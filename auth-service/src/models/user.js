@@ -36,6 +36,10 @@ const userSchema = new mongoose.Schema(
       type: String,
     },
 
+    tempMfaSecret: {
+      type: String,
+    },
+
     devices: [
       {
         deviceId: { type: String, required: true },
@@ -45,6 +49,16 @@ const userSchema = new mongoose.Schema(
         createdAt: { type: Date, default: Date.now },
       },
     ],
+
+    securityChallenges: {
+      questionPool: [
+        {
+          questionId: { type: String, required: true },
+          answerHash: { type: String, required: true }, // Bcrypt hashed answer
+        },
+      ],
+      isConfigured: { type: Boolean, default: false },
+    },
   },
   { timestamps: true },
 );

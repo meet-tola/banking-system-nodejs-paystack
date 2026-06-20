@@ -3,7 +3,7 @@ const QRCode = require("qrcode");
 
 const generateSecret = (email) => {
   return speakeasy.generateSecret({
-    name: `BankingSystem (${email})`,
+    name: `SECURE_LEDGER (${email})`,
   });
 };
 
@@ -11,11 +11,12 @@ const generateQRCode = async (otpauthUrl) => {
   return await QRCode.toDataURL(otpauthUrl);
 };
 
-const verifyTOTP = (token, secret) => {
+const verifyTOTP = (secret, token) => {
   return speakeasy.totp.verify({
-    secret,
+    secret: secret,
     encoding: "base32",
-    token,
+    token: token,
+    window: 2, 
   });
 };
 

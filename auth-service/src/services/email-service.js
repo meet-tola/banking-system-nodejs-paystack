@@ -5,26 +5,45 @@ require("dotenv").config({
 const nodemailer = require("nodemailer");
 const logger = require("../utils/logger");
 
+// const transporter = nodemailer.createTransport({
+//   service: "gmail",
+//   auth: {
+//     type: "OAuth2",
+//     user: process.env.EMAIL_USER,
+//     clientId: process.env.CLIENT_ID,
+//     clientSecret: process.env.CLIENT_SECRET,
+//     refreshToken: process.env.REFRESH_TOKEN,
+//   },
+// });
+
 const transporter = nodemailer.createTransport({
-  // service: "gmail",
   host: "smtp.gmail.com",
   port: 587,
   secure: false,
   auth: {
-    type: "OAuth2",
     user: process.env.EMAIL_USER,
-    clientId: process.env.CLIENT_ID,
-    clientSecret: process.env.CLIENT_SECRET,
-    refreshToken: process.env.REFRESH_TOKEN,
+    pass: process.env.EMAIL_APP_PASSWORD,
   },
+  tls: {
+    rejectUnauthorized: false,
+  },
+});
+
+transporter.verify((error, success) => {
+  if (error) {
+    logger.error(`Nodemailer setup error: ${error.message}`);
+  } else {
+    logger.info("Nodemailer connected successfully.");
+  }
 });
 
 const sendOtpEmail = async (email, otp, metadata = {}) => {
   logger.info(`Attempting to send OTP email to: ${email}`);
 
-  const { isNewDevice, deviceName, locationStr, userId } = metadata;
+  const { isNewDevice, deviceName, locationStr, userId, challengeToken } =
+    metadata;
 
-  const resetLink = `${process.env.FRONTEND_URL || "https://yourbankingapp.com"}/reset-password?userId=${userId || ""}`;
+  const resetLink = `${process.env.FRONTEND_URL}/reset-password?userId=${userId}&otp=${otp}${challengeToken ? `&challengeToken=${challengeToken}` : ""}`;
 
   let securityNoticeHtml = "";
   if (isNewDevice) {

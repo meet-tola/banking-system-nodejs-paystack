@@ -1,7 +1,6 @@
-require("dotenv").config({
-  path: require("path").resolve(__dirname, "../.env"),
-});
-const { Kafka, Partitioners } = require("kafkajs");
+const fs = require("fs");
+const path = require("path");
+const { Kafka } = require("kafkajs");
 const logger = require("../utils/logger");
 
 // Handler bindings
@@ -16,8 +15,9 @@ const {
   handleTransactionCompleted,
 } = require("./handlers/transaction-handlers");
 
+// Build the base configuration
 const kafkaOptions = {
-  clientId: "fraud-service",
+  clientId: "auth-service",
   brokers: (process.env.KAFKA_BROKERS || "kafka:29092").split(","),
 };
 
@@ -60,11 +60,6 @@ if (hasEnvCerts || hasLocalCerts) {
   logger.warn("Kafka is running without mTLS configuration.");
 }
 
-const kafka = new Kafka(kafkaOptions);
-const producer = kafka.producer({
-  createPartitioner: Partitioners.LegacyPartitioner,
-});
-
 const connectKafka = async () => {
   try {
     await producer.connect();
@@ -79,14 +74,44 @@ const consumer = kafka.consumer({ groupId: "fraud-service-core-group" });
 
 const startFraudConsumerContext = async () => {
   try {
+    const admin = kafka.admin();
+    logger.info(
+      "Connecting Kafka Admin Client to verify core infrastructure topics...",
+    );
+    await admin.connect();
+
+    const requiredTopics = ["user-auth", "transaction-events", "ledger-events"];
+    const existingTopics = await admin.listTopics();
+
+    const topicsToCreate = requiredTopics
+      .filter((topic) => !existingTopics.includes(topic))
+      .map((topic) => ({
+        topic: topic,
+        numPartitions: 1,
+        replicationFactor: -1,
+      }));
+
+    if (topicsToCreate.length > 0) {
+      logger.info(
+        `Missing topics detected. Dynamically creating: ${topicsToCreate.map((t) => t.topic).join(", ")}`,
+      );
+      await admin.createTopics({
+        topics: topicsToCreate,
+        waitForLeaders: true,
+      });
+      logger.info("Topics created successfully!");
+    } else {
+      logger.info("All structural routing topics validated on server cluster.");
+    }
+
+    await admin.disconnect();
+
     await consumer.connect();
     logger.info("Fraud engine consumer mapping stream connection successful.");
 
-    // Bind system-wide stream updates vectors
     await consumer.subscribe({
-      topics: ["user-auth", "transaction-events", "ledger-events"],
+      topics: requiredTopics,
       fromBeginning: false,
-      allowAutoTopicCreation: true,
     });
 
     await consumer.run({
@@ -95,7 +120,6 @@ const startFraudConsumerContext = async () => {
           const structuralRawContent = message.value.toString();
           const compiledEvent = JSON.parse(structuralRawContent);
 
-          // Extract routing key signatures from custom properties or metadata fields inside streams
           const eventType =
             message.headers?.eventType?.toString() ||
             compiledEvent.eventType ||

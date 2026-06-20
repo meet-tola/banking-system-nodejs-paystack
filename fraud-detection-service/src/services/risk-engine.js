@@ -13,22 +13,21 @@ const evaluateRiskProfile = async (eventType, payload, context = {}) => {
   const amount = parseFloat(payload.amount || 0);
   const { ip, deviceId } = context;
 
-  // Resolve High-Speed Local Read Model Profiler
   let profile = null;
   if (userId) {
     profile = await FraudProfile.findOne({ userId });
   }
 
-  // ---- RULE 1: COMPLEX MULTI-EVENT BEHAVIOR CHAINING ----
+  // RULE 1: COMPLEX MULTI-EVENT BEHAVIOR CHAINING
   if (eventType === "transaction.created" && profile?.lastPasswordChangedAt) {
     const timeDelta = Date.now() - new Date(profile.lastPasswordChangedAt).getTime();
-    if (timeDelta < 30 * 60 * 1000) { // 30-minute systemic attack window
+    if (timeDelta < 30 * 60 * 1000) {
       breakdown.behavioral += 50;
       triggeredRules.push("IMMEDIATE_TRANSFER_AFTER_PASSWORD_CHANGE");
     }
   }
 
-  // ---- RULE 2: SYSTEMIC VELOCITY ASSIGNMENT ----
+  // RULE 2: SYSTEMIC VELOCITY ASSIGNMENT 
   if (userId && eventType === "transaction.created") {
     const velocityKey = `fraud:velocity:tx:${userId}`;
     const velocityCheck = await checkVelocityWindow(velocityKey, 5, 60); // Max 5 transfers per minute
@@ -42,7 +41,7 @@ const evaluateRiskProfile = async (eventType, payload, context = {}) => {
     }
   }
 
-  // ---- RULE 3: DEVICE IDENTITY & GEOGRAPHIC RISK ----
+  //  RULE 3: DEVICE IDENTITY & GEOGRAPHIC RISK
   if ((eventType === "user.logged_in" || eventType === "transaction.created") && profile) {
     if (deviceId) {
       const isDeviceRecognized = profile.knownDevices.some(d => d.deviceId === deviceId);
@@ -57,7 +56,7 @@ const evaluateRiskProfile = async (eventType, payload, context = {}) => {
     }
   }
 
-  // ---- RULE 4: STRUCTURAL ANOMALIES & HISTORICAL AVERAGES ----
+  // RULE 4: STRUCTURAL ANOMALIES & HISTORICAL AVERAGES
   if (eventType === "transaction.created") {
     if (amount > 10000) { // High transfer limit ceiling
       breakdown.ruleBased += 30;
@@ -82,17 +81,16 @@ const evaluateRiskProfile = async (eventType, payload, context = {}) => {
     }
   }
 
-  // ---- RULE LAYER 5: BRUTE FORCE REPEATED TRANSFER FAILURES ----
+  // RULE LAYER 5: BRUTE FORCE REPEATED TRANSFER FAILURES
   if (eventType === "transaction.failed" && fromAccount) {
     const failureKey = `fraud:failures:wallet:${fromAccount}`;
-    const failureCheck = await checkVelocityWindow(failureKey, 3, 300); // 3 failures in 5 mins
+    const failureCheck = await checkVelocityWindow(failureKey, 3, 300); 
     if (failureCheck.isLimitExceeded) {
       breakdown.velocity += 45;
       triggeredRules.push("BRUTE_FORCE_TRANSFER_SUSPICION");
     }
   }
 
-  // Compile composite final numbers (Hard ceiling at 100)
   riskScore = Math.min(100, breakdown.ruleBased + breakdown.device + breakdown.velocity + breakdown.behavioral);
 
   let recommendation = "ALLOW";

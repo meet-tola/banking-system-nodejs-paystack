@@ -1,6 +1,7 @@
 const logger = require("../utils/logger");
 const FraudRiskLog = require("../models/fraud-risk-log");
 const FraudProfile = require("../models/fraud-profile");
+const { evaluateRiskProfile } = require("../services/risk-engine");
 
 const getRiskLogs = async (req, res, next) => {
   try {
@@ -11,15 +12,38 @@ const getRiskLogs = async (req, res, next) => {
     if (recommendation) filter.recommendation = recommendation;
     if (eventType) filter.eventType = eventType;
 
-    const logs = await FraudRiskLog.find(filter).sort({ createdAt: -1 }).limit(100);
+    const logs = await FraudRiskLog.find(filter)
+      .sort({ createdAt: -1 })
+      .limit(100);
 
     return res.status(200).json({
       success: true,
       count: logs.length,
-      data: logs
+      data: logs,
     });
   } catch (err) {
-    logger.error("Failed to query systemic threat analytics collections logs", err);
+    logger.error(
+      "Failed to query systemic threat analytics collections logs",
+      err,
+    );
+    next(err);
+  }
+};
+
+const riskEvaluate = async (req, res, next) => {
+  try {
+    const { eventType, payload, context } = req.body;
+    const assessment = await evaluateRiskProfile(eventType, payload, context);
+
+    return res.json({ success: true, assessment });
+  } catch (err) {
+    logger.error(
+      "Risk evaluation failed",
+      err,
+    );
+    return res
+      .status(500)
+      .json({ success: false, message: "Risk evaluation failed" });
     next(err);
   }
 };
@@ -32,16 +56,20 @@ const getUserFraudProfile = async (req, res, next) => {
     if (!profile) {
       return res.status(404).json({
         success: false,
-        message: "Fraud baseline identity profile not resolved for entity query"
+        message:
+          "Fraud baseline identity profile not resolved for entity query",
       });
     }
 
     return res.status(200).json({
       success: true,
-      data: profile
+      data: profile,
     });
   } catch (err) {
-    logger.error("Failed resolving specific individual structural profile records details", err);
+    logger.error(
+      "Failed resolving specific individual structural profile records details",
+      err,
+    );
     next(err);
   }
 };
@@ -54,7 +82,7 @@ const resolveTriggerAlertOverride = async (req, res, next) => {
     if (!forceOverrideStatus) {
       return res.status(400).json({
         success: false,
-        message: "forceOverrideStatus parameter missing inside payload updates"
+        message: "forceOverrideStatus parameter missing inside payload updates",
       });
     }
 
@@ -62,7 +90,7 @@ const resolveTriggerAlertOverride = async (req, res, next) => {
     if (!log) {
       return res.status(404).json({
         success: false,
-        message: "Targeted critical risk record reference sequence missing"
+        message: "Targeted critical risk record reference sequence missing",
       });
     }
 
@@ -71,9 +99,10 @@ const resolveTriggerAlertOverride = async (req, res, next) => {
       ...log.payloadSnapshot,
       overrideResolutionMeta: {
         agentId: req.user?.userId || "SYSTEM_ADMIN",
-        comment: adminResolutionComment || "Manual verification cleared override",
-        resolvedAt: new Date()
-      }
+        comment:
+          adminResolutionComment || "Manual verification cleared override",
+        resolvedAt: new Date(),
+      },
     };
 
     await log.save();
@@ -81,10 +110,13 @@ const resolveTriggerAlertOverride = async (req, res, next) => {
     return res.status(200).json({
       success: true,
       message: `System target risk state changed status override to: ${forceOverrideStatus}`,
-      data: log
+      data: log,
     });
   } catch (err) {
-    logger.error("Internal threat evaluation resolution agent override transaction failure", err);
+    logger.error(
+      "Internal threat evaluation resolution agent override transaction failure",
+      err,
+    );
     next(err);
   }
 };
@@ -92,5 +124,6 @@ const resolveTriggerAlertOverride = async (req, res, next) => {
 module.exports = {
   getRiskLogs,
   getUserFraudProfile,
-  resolveTriggerAlertOverride
+  resolveTriggerAlertOverride,
+  riskEvaluate,
 };

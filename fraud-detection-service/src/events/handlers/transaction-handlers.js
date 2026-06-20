@@ -25,7 +25,6 @@ const handleTransactionCreated = async (event) => {
 
     if (assessment.recommendation === "BLOCK") {
       logger.error(`[CRITICAL SECURITY ALERT] BLOCK enforcement recommended on transaction: ${transactionId} for account: ${fromAccount}`);
-      // Intercept execution loop here: communicate directly back to processing systems or emit an account/transaction freeze event
     }
   } catch (err) {
     logger.error("Failed processing analytics execution for created transaction", err);
@@ -60,18 +59,15 @@ const handleTransactionCompleted = async (event) => {
     const { fromAccount, amount } = event.payload || event;
     if (!fromAccount || !amount) return;
 
-    // Asynchronously update sliding historic transaction bounds in Redis to avoid hitting the Ledger DB
     const cacheKey = `fraud:baseline:avg:${fromAccount}`;
     const currentCachedAverage = await redis.get(cacheKey);
 
     let newAverage = parseFloat(amount);
     if (currentCachedAverage) {
       const totalAverageValue = parseFloat(currentCachedAverage);
-      // Continuous weight smoothing logic
       newAverage = (totalAverageValue * 0.7) + (parseFloat(amount) * 0.3);
     }
 
-    // Retain baseline historical footprints for 30 days
     await redis.setex(cacheKey, 2592000, newAverage.toFixed(2));
     logger.info(`Recalculated internal behavioral baseline cache for wallet profile: ${fromAccount} to ${newAverage.toFixed(2)}`);
   } catch (err) {

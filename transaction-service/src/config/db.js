@@ -2,7 +2,10 @@ require("dotenv").config({
   path: require("path").resolve(__dirname, "../.env"),
 });
 const mongoose = require("mongoose");
+const dns = require("node:dns"); 
 const logger = require("../utils/logger");
+
+dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
 const connectDB = async () => {
   try {

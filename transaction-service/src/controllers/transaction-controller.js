@@ -140,6 +140,49 @@ const createTransaction = async (req, res) => {
         .json({ success: false, message: "Insufficient balance" });
     }
 
+    const contextMeta = {
+      ip: req.ip,
+      deviceId: req.headers["x-device-id"],
+      userAgent: req.headers["user-agent"],
+    };
+
+    try {
+      const riskResponse = await axios.post(
+        `${process.env.FRAUD_SERVICE_URL}/api/risk/evaluate`,
+        {
+          eventType: "transaction.created",
+          payload: { userId: req.user.userId, fromAccount, toAccount, amount },
+          context: contextMeta,
+        },
+        {
+          headers: { "x-internal-service-token": process.env.INTERNAL_SERVICE_TOKEN },
+          timeout: 2000, // Strict timeout to avoid blocking users
+        }
+      );
+
+      const { recommendation, riskScore, triggeredRules } = riskResponse.data.assessment;
+
+      if (recommendation === "BLOCK") {
+        logger.error(`${logCtx} Security Interception: Transaction blocked. Score: ${riskScore}`);
+        return res.status(403).json({
+          success: false,
+          code: "SECURITY_BLOCK",
+          message: "Transaction flagged and rejected for security reasons.",
+        });
+      }
+
+      if (recommendation === "CHALLENGE_MFA") {
+        logger.warn(`${logCtx} Security Interception: MFA Step-Up required. Score: ${riskScore}`);
+        return res.status(401).json({
+          success: false,
+          code: "REQUIRES_STEP_UP",
+          message: "Additional verification required to complete this transfer.",
+        });
+      }
+    } catch (fraudError) {
+      logger.error(`${logCtx} Fraud engine connection failure: ${fraudError.message}`);
+    }
+
     // Instantiate Pending Database Document Node
     const transaction = await Transaction.create({
       fromAccount,
@@ -148,12 +191,6 @@ const createTransaction = async (req, res) => {
       idempotencyKey,
       status: "PENDING",
     });
-
-    const contextMeta = {
-      ip: req.ip,
-      deviceId: req.headers["x-device-id"],
-      userAgent: req.headers["user-agent"],
-    };
 
     // Dispatch asset settlement allocation execution
     try {

@@ -312,17 +312,17 @@ const getTransactionById = async (req, res) => {
         ...transaction.toObject(),
         sender: senderInfo
           ? {
-              id: senderUserId,
-              name: senderInfo.fullName,
-              email: senderInfo.email,
-            }
+            id: senderUserId,
+            name: senderInfo.fullName,
+            email: senderInfo.email,
+          }
           : null,
         receiver: receiverInfo
           ? {
-              id: receiverUserId,
-              name: receiverInfo.fullName,
-              email: receiverInfo.email,
-            }
+            id: receiverUserId,
+            name: receiverInfo.fullName,
+            email: receiverInfo.email,
+          }
           : null,
       },
     });
